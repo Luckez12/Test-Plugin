@@ -1,0 +1,148 @@
+name: Bootstrap Nuvio Provider Workspace
+
+on:
+  workflow_dispatch:
+    inputs:
+      provider_id:
+        description: "Optional provider ID"
+        required: false
+        default: ""
+      provider_name:
+        description: "Optional provider name"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Ensure current Nuvio manifest format
+        shell: bash
+        run: |
+          set -e
+          mkdir -p src/_template providers scripts tests
+
+          node <<'EOF'
+          const fs = require("fs");
+
+          const file = "manifest.json";
+          let manifest = {
+            name: "Luckez12 Plugins",
+            version: "1.0.0",
+            scrapers: []
+          };
+
+          if (fs.existsSync(file)) {
+            const current = JSON.parse(fs.readFileSync(file, "utf8"));
+
+            if (Array.isArray(current)) {
+              manifest.scrapers = current;
+            } else if (current && typeof current === "object") {
+              manifest = current;
+              if (!manifest.name) manifest.name = "Luckez12 Plugins";
+              if (!manifest.version) manifest.version = "1.0.0";
+              if (!Array.isArray(manifest.scrapers)) manifest.scrapers = [];
+            }
+          }
+
+          fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
+          EOF
+
+      - name: Register requested provider
+        if: ${{ inputs.provider_id != '' }}
+        shell: bash
+        env:
+          PROVIDER_ID: ${{ inputs.provider_id }}
+          PROVIDER_NAME: ${{ inputs.provider_name }}
+        run: |
+          set -e
+
+          if ! echo "$PROVIDER_ID" | grep -Eq '^[a-z0-9_-]+$'; then
+            echo "Invalid provider_id"
+            exit 1
+          fi
+
+          mkdir -p "src/$PROVIDER_ID"
+
+          if [ ! -f "src/$PROVIDER_ID/index.js" ]; then
+            cat > "src/$PROVIDER_ID/index.js" <<'EOF'
+          function getStreams(tmdbId, mediaType, season, episode) {
+            console.log("[provider]", { tmdbId, mediaType, season, episode });
+            return Promise.resolve([]);
+          }
+
+          module.exports = { getStreams };
+          EOF
+          fi
+
+          node <<'EOF'
+          const fs = require("fs");
+
+          const id = process.env.PROVIDER_ID;
+          const name = process.env.PROVIDER_NAME || id;
+          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
+
+          const entry = {
+            id,
+            name,
+            description: `${name} Nuvio provider`,
+            version: "1.0.0",
+            author: "Luckez12",
+            supportedTypes: ["movie", "tv"],
+            filename: `providers/${id}.js`,
+            enabled: true
+          };
+
+          const index = manifest.scrapers.findIndex(x => x.id === id);
+          if (index >= 0) manifest.scrapers[index] = {
+            ...manifest.scrapers[index],
+            ...entry
+          };
+          else manifest.scrapers.push(entry);
+
+          fs.writeFileSync(
+            "manifest.json",
+            JSON.stringify(manifest, null, 2) + "\n"
+          );
+          EOF
+
+      - name: Install dependencies
+        if: ${{ hashFiles('package.json') != '' }}
+        run: npm install
+
+      - name: Build providers
+        if: ${{ hashFiles('package.json') != '' }}
+        run: npm run build
+
+      - name: Validate manifest
+        if: ${{ hashFiles('scripts/validate-manifest.js') != '' }}
+        run: node scripts/validate-manifest.js
+
+      - name: Commit changes
+        shell: bash
+        run: |
+          set -e
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add .
+          git commit -m "Fix Nuvio repository manifest format"
+          git push

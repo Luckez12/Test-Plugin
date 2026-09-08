@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.0.4";
+const VERSION = "1.0.5";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 const CryptoJS = require("crypto-js");
@@ -19,9 +19,10 @@ const PATH_RESOURCE = "/wefeed-mobile-bff/subject-api/resource";
 const PATH_PLAY_INFO = "/wefeed-mobile-bff/subject-api/play-info";
 const PATH_BOOTSTRAP = "/wefeed-mobile-bff/tab-operating";
 const SECRET_KEY_B64 = "76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O";
-const VERSION_CODE = 50020118;
-const VERSION_NAME = "4.0.01.0807.03";
+const VERSION_CODE = 50020044;
+const VERSION_NAME = "3.0.03.0529.03";
 const MOBILE_UA = "com.community.oneroom/" + VERSION_CODE + " (Linux; U; Android 13; en_US; 23078RKD5C; Build/TQ2A.230405.003; Cronet/135.0.7012.3)";
+const FORWARDED_IP = "197.210.65.1";
 
 var SESSION = {
   token: null,
@@ -178,7 +179,8 @@ function buildSignedHeaders(method, url, body, authToken) {
     "X-Client-Info": makeClientInfo(),
     "X-Client-Status": "0",
     "X-Play-Mode": "2",
-    "Cache-Control": "no-cache"
+    "Cache-Control": "no-cache",
+    "X-Forwarded-For": FORWARDED_IP
   };
   if (authToken) headers.Authorization = "Bearer " + authToken;
   return headers;
@@ -334,30 +336,41 @@ function findSubject(info) {
 }
 
 function fetchResolution(subjectId, mediaType, season, episode, resolution) {
-  var se = mediaType === "tv" ? Number(season || 1) : 0;
-  var ep = mediaType === "tv" ? Number(episode || 1) : 0;
-  return apiCall(PATH_RESOURCE, "GET", {
-    subjectId: subjectId,
-    se: se,
-    ep: ep,
-    resolution: resolution,
-    page: 1,
-    perPage: 10
-  }, null).then(function (result) {
-    var data = result && result.data ? result.data : {};
-    var list = Array.isArray(data.list) ? data.list : [];
+  var targetSe = mediaType === "tv" ? Number(season || 1) : 0;
+  var targetEp = mediaType === "tv" ? Number(episode || 1) : 0;
+
+  function fetchPage(page, acc) {
+    // Current MovieBox Android API is most reliable when se=0&ep=0 is used
+    // to fetch the resource pack, then the requested TV episode is filtered locally.
+    return apiCall(PATH_RESOURCE, "GET", {
+      subjectId: subjectId,
+      se: 0,
+      ep: 0,
+      resolution: resolution,
+      page: page,
+      perPage: 10
+    }, null).then(function (result) {
+      var data = result && result.data ? result.data : {};
+      var list = Array.isArray(data.list) ? data.list : [];
+      list.forEach(function (item) {
+        item._requestedResolution = resolution;
+        if (!Number(item.resolution)) item.resolution = resolution;
+        acc.push(item);
+      });
+      var hasMore = !!(data.pager && data.pager.hasMore);
+      if (hasMore && page < 20) return fetchPage(page + 1, acc);
+      return { host: result ? result.host : "none", items: acc };
+    });
+  }
+
+  return fetchPage(1, []).then(function (result) {
+    var list = result.items || [];
     if (mediaType === "tv") {
       list = list.filter(function (item) {
-        return Number(item.se) === se && Number(item.ep) === ep;
+        return Number(item.se) === targetSe && Number(item.ep) === targetEp;
       });
     }
-    list.forEach(function (item) {
-      // Some current MovieBox responses omit/zero the resolution field even
-      // though the endpoint itself was filtered by resolution.
-      item._requestedResolution = resolution;
-      if (!Number(item.resolution)) item.resolution = resolution;
-    });
-    console.log("[MovieBox] resource " + resolution + "p host=" + (result ? result.host : "none") + " items=" + list.length);
+    console.log("[MovieBox] resource " + resolution + "p host=" + result.host + " items=" + list.length + " geo=NG");
     return list;
   }).catch(function (error) {
     console.log("[MovieBox] resource " + resolution + "p error=" + (error && error.message ? error.message : String(error)));
@@ -571,6 +584,81 @@ function resolveViaPlayInfo(items, subjectId, mediaType, season, episode) {
   return tryCandidate(0);
 }
 
+function hostOf(url) {
+  return String(url || "").replace(/^https?:\/\//i, "").split("/")[0];
+}
+
+function directCandidateScore(item) {
+  var score = 0;
+  var resolution = Number(item && (item.resolution || item._requestedResolution) || 0);
+  var member = Number(item && item.requireMemberType || 0);
+  var linkType = Number(item && item.linkType || 0);
+  if (member === 0) score += 1000000000000;
+  else score -= member * 100000000000;
+  if (linkType === 1) score += 50000000000;
+  score += resolution * 100000000;
+  score += candidateDuration(item) * 10000;
+  score += candidateSize(item);
+  return score;
+}
+
+function resolveDirectResources(items, mediaType) {
+  var unique = uniqueCandidates(items).filter(function (item) {
+    return /^https?:\/\//i.test(String(item && item.resourceLink || ""));
+  });
+  if (!unique.length) return Promise.resolve([]);
+
+  unique.sort(function (a, b) { return directCandidateScore(b) - directCandidateScore(a); });
+
+  // Keep the best candidate per quality first. This mirrors the current
+  // resourceLink flow and avoids returning duplicate mirrors for one quality.
+  var byQuality = {};
+  unique.forEach(function (item) {
+    var q = Number(item.resolution || item._requestedResolution || 0) || 0;
+    if (!byQuality[q]) byQuality[q] = item;
+  });
+  var selected = Object.keys(byQuality).map(function (q) { return byQuality[q]; })
+    .sort(function (a, b) { return Number(b.resolution || b._requestedResolution || 0) - Number(a.resolution || a._requestedResolution || 0); })
+    .slice(0, 4);
+
+  return Promise.all(selected.map(function (item, i) {
+    return probeCandidate(item, i + 1);
+  })).then(function (probes) {
+    var minBytes = mediaType === "movie" ? 20 * 1024 * 1024 : 8 * 1024 * 1024;
+    var streams = [];
+
+    probes.forEach(function (p) {
+      var item = p.item || {};
+      var apiBytes = candidateSize(item);
+      var actualBytes = Number(p.bytes || 0);
+      var validStatus = p.status === 200 || p.status === 206;
+      var tinyMismatch = apiBytes >= 50 * 1024 * 1024 && actualBytes > 0 && actualBytes < minBytes;
+      var likelyFull = actualBytes >= minBytes || (actualBytes === 0 && apiBytes >= minBytes);
+      var qn = Number(item.resolution || item._requestedResolution || 0);
+      console.log("[MovieBox] direct check q=" + qn +
+        " host=" + hostOf(item.resourceLink) +
+        " apiMB=" + Math.round(apiBytes / 1048576) +
+        " actualMB=" + (actualBytes ? Math.round(actualBytes / 1048576) : 0) +
+        " ok=" + (validStatus && likelyFull && !tinyMismatch));
+      if (!validStatus || tinyMismatch || !likelyFull) return;
+
+      streams.push({
+        name: PROVIDER,
+        title: "MovieBox • " + (qn ? qn + "p" : "Auto") + " • Direct",
+        url: String(item.resourceLink),
+        quality: qn ? qn + "p" : "Auto",
+        headers: {
+          "User-Agent": MOBILE_UA,
+          "Accept": "*/*"
+        }
+      });
+    });
+
+    console.log("[MovieBox] direct verified=" + streams.length + "/" + probes.length);
+    return streams;
+  });
+}
+
 function selectPlayableByActualSize(items, mediaType) {
   var unique = uniqueCandidates(items);
   if (!unique.length) return Promise.resolve([]);
@@ -629,7 +717,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
   episode = Number(episode || 1);
-  console.log("[MovieBox] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : ""));
+  console.log("[MovieBox] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : "") + " geo=NG");
 
   var info = null;
   var matchedSubjectId = null;
@@ -651,7 +739,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (items) {
       if (!items) return [];
-      return resolveViaPlayInfo(items, matchedSubjectId, mediaType, season, episode);
+      return resolveDirectResources(items, mediaType);
     })
     .then(function (streams) {
       streams = streams || [];

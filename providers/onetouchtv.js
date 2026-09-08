@@ -6,6 +6,10 @@ const AES_KEY = "im72charPasswordofdInitVectorStm";
 const AES_IV = "im72charPassword";
 const USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
+const decryptedCache = new Map();
+const searchCache = new Map();
+
+
 function fetchText(url, options) {
   return fetch(url, options || {}).then(function (res) {
     if (!res || !res.ok) {
@@ -178,6 +182,10 @@ function decryptViaRemote(raw) {
 }
 
 function getDecryptedJson(url) {
+  if (decryptedCache.has(url)) {
+    return Promise.resolve(decryptedCache.get(url));
+  }
+
   return fetchText(url, {
     headers: {
       "Accept": "application/json,text/plain,*/*",
@@ -185,15 +193,12 @@ function getDecryptedJson(url) {
       "User-Agent": USER_AGENT
     }
   }).then(function (raw) {
-    try {
-      return parseJsonLenient(decryptString(raw), "decrypted result");
-    } catch (localError) {
-      console.log(
-        "[OneTouchTV] local decrypt failed, trying remote fallback: " +
-        (localError && localError.message ? localError.message : String(localError))
-      );
-      return decryptViaRemote(raw);
-    }
+    // Current OneTouchTV payloads are not reliably compatible with the
+    // local AES routine. Use the working decrypt endpoint directly.
+    return decryptViaRemote(raw);
+  }).then(function (result) {
+    decryptedCache.set(url, result);
+    return result;
   });
 }
 
@@ -284,14 +289,16 @@ function buildQueries(details, mediaType, season) {
     .concat(Array.isArray(details.alternativeTitles) ? details.alternativeTitles : [])
     .filter(Boolean);
 
-  if (mediaType === "tv" && Number(season || 1) > 1) {
-    titles.slice(0, 4).forEach(function (title) {
-      seasonTitleVariants(title, season).forEach(add);
-    });
+  // Search the canonical title first because it usually returns the season
+  // variants in one response. Only keep a few targeted fallbacks.
+  titles.slice(0, 2).forEach(add);
+
+  if (mediaType === "tv" && Number(season || 1) > 1 && titles[0]) {
+    add(titles[0] + " Season " + Number(season));
+    add(titles[0] + " S" + String(Number(season)).padStart(2, "0"));
   }
 
-  titles.forEach(add);
-  return queries.slice(0, 12);
+  return queries.slice(0, 4);
 }
 
 function parseSearchPayload(payload) {
@@ -618,7 +625,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (payload) {
       var streams = parseStreams(payload);
-      console.log("[OneTouchTV] v1.0.3 playable sources=" + streams.length);
+      console.log("[OneTouchTV] v1.0.4 playable sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

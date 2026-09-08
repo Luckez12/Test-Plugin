@@ -76,6 +76,32 @@
         "ms"
       ],
       "supportsExternalPlayer": true
+    },
+    {
+      "id": "pencurimovie",
+      "name": "PencuriMovie",
+      "description": "PencuriMovie movies and TV series provider",
+      "version": "1.0.0",
+      "author": "Luckez12",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/pencurimovie.js",
+      "enabled": true,
+      "hasSettings": false,
+      "formats": [
+        "m3u8",
+        "mp4",
+        "mkv",
+        "webm"
+      ],
+      "contentLanguage": [
+        "ms",
+        "en",
+        "id"
+      ],
+      "supportsExternalPlayer": true
     }
   ]
 }

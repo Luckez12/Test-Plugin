@@ -81,7 +81,7 @@
       "id": "pencurimovie",
       "name": "PencuriMovie",
       "description": "PencuriMovie movies and TV series provider",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

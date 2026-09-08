@@ -8,24 +8,26 @@
       "description": "KissKH Asian dramas and movies",
       "version": "1.0.3",
       "author": "Luckez12",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
+      "supportedTypes": ["movie", "tv"],
       "filename": "providers/kisskh.js",
       "enabled": true,
       "hasSettings": false,
-      "formats": [
-        "m3u8",
-        "mp4"
-      ],
-      "contentLanguage": [
-        "ko",
-        "zh",
-        "ja",
-        "th",
-        "en"
-      ]
+      "formats": ["m3u8", "mp4"],
+      "contentLanguage": ["ko", "zh", "ja", "th", "en"]
+    },
+    {
+      "id": "onetouchtv",
+      "name": "OneTouchTV",
+      "description": "OneTouchTV movies and series provider",
+      "version": "1.0.0",
+      "author": "Luckez12",
+      "supportedTypes": ["movie", "tv"],
+      "filename": "providers/onetouchtv.js",
+      "enabled": true,
+      "hasSettings": false,
+      "formats": ["m3u8", "mp4"],
+      "contentLanguage": ["en", "ko", "zh", "ja", "th"],
+      "supportsExternalPlayer": true
     }
   ]
 }

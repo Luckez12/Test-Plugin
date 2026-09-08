@@ -1,0 +1,14 @@
+{
+  "name": "test-plugin-nuvio-providers",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Nuvio provider development workspace",
+  "scripts": {
+    "build": "node build.js",
+    "validate": "node scripts/validate-manifest.js",
+    "test:provider": "node tests/test-provider.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}

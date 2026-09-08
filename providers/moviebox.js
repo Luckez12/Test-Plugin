@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.0.6";
+const VERSION = "1.0.7";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 const CryptoJS = require("crypto-js");
@@ -786,11 +786,79 @@ function selectPlayableByActualSize(items, mediaType) {
     }];
   });
 }
+function verifyFastDirectCandidate(item, mediaType, index) {
+  return probeCandidate(item, index).then(function (p) {
+    var apiBytes = candidateSize(item);
+    var actualBytes = Number(p.bytes || 0);
+    var minBytes = mediaType === "movie" ? 20 * 1024 * 1024 : 8 * 1024 * 1024;
+    var validStatus = p.status === 200 || p.status === 206;
+    var tinyMismatch = apiBytes >= 50 * 1024 * 1024 && actualBytes > 0 && actualBytes < minBytes;
+    var likelyFull = actualBytes >= minBytes || (actualBytes === 0 && apiBytes >= minBytes);
+    var qn = Number(item.resolution || item._requestedResolution || 0);
+    var ok = validStatus && likelyFull && !tinyMismatch;
+
+    console.log("[MovieBox] fast direct check q=" + qn +
+      " host=" + hostOf(item.resourceLink) +
+      " apiMB=" + Math.round(apiBytes / 1048576) +
+      " actualMB=" + (actualBytes ? Math.round(actualBytes / 1048576) : 0) +
+      " ok=" + ok);
+
+    if (!ok) return null;
+    return {
+      name: PROVIDER,
+      title: "MovieBox • " + (qn ? qn + "p" : "Auto") + " • Direct",
+      url: String(item.resourceLink),
+      quality: qn ? qn + "p" : "Auto",
+      headers: {
+        "User-Agent": MOBILE_UA,
+        "Accept": "*/*"
+      }
+    };
+  });
+}
+
+function fastDirectByResolution(subjectId, mediaType, season, episode) {
+  var resolutions = [1080, 720, 480, 360];
+
+  function tryResolution(rIndex) {
+    if (rIndex >= resolutions.length) return Promise.resolve([]);
+    var resolution = resolutions[rIndex];
+
+    return fetchResolution(subjectId, mediaType, season, episode, resolution).then(function (items) {
+      var candidates = uniqueCandidates(items).filter(function (item) {
+        return /^https?:\/\//i.test(String(item && item.resourceLink || ""));
+      }).sort(function (a, b) {
+        return directCandidateScore(b) - directCandidateScore(a);
+      }).slice(0, 3);
+
+      if (!candidates.length) return tryResolution(rIndex + 1);
+
+      function tryCandidate(i) {
+        if (i >= candidates.length) return tryResolution(rIndex + 1);
+        return verifyFastDirectCandidate(candidates[i], mediaType, i + 1).then(function (stream) {
+          if (stream) {
+            console.log("[MovieBox] fast return q=" + stream.quality + " candidate=" + (i + 1));
+            return [stream];
+          }
+          return tryCandidate(i + 1);
+        });
+      }
+
+      return tryCandidate(0);
+    }).catch(function (error) {
+      console.log("[MovieBox] fast resource " + resolution + "p error=" + (error && error.message ? error.message : String(error)));
+      return tryResolution(rIndex + 1);
+    });
+  }
+
+  return tryResolution(0);
+}
+
 function getStreams(tmdbId, mediaType, season, episode) {
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
   episode = Number(episode || 1);
-  console.log("[MovieBox] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : "") + " region=US sp=90101");
+  console.log("[MovieBox] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : "") + " region=US sp=90101 fastDirect=true");
 
   var info = null;
   var matchedSubjectId = null;
@@ -804,22 +872,11 @@ function getStreams(tmdbId, mediaType, season, episode) {
     .then(function (item) {
       if (!item) {
         console.log("[MovieBox] title not found");
-        return null;
+        return [];
       }
       matchedSubjectId = String(item.subjectId || "").trim();
       console.log("[MovieBox] matched title='" + String(item.title || "") + "' year=" + parseYear(item.releaseDate) + " id=" + matchedSubjectId);
-      return loadStreams(item, mediaType, season, episode);
-    })
-    .then(function (items) {
-      if (!items) return { items: [], streams: [] };
-      return resolveCurrentPlayInfo(items, matchedSubjectId, mediaType, season, episode).then(function (streams) {
-        return { items: items, streams: streams || [] };
-      });
-    })
-    .then(function (state) {
-      if (state.streams && state.streams.length) return state.streams;
-      console.log("[MovieBox] play-info empty, fallback direct resourceLink");
-      return resolveDirectResources(state.items || [], mediaType);
+      return fastDirectByResolution(matchedSubjectId, mediaType, season, episode);
     })
     .then(function (streams) {
       streams = streams || [];

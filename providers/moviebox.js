@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.0.3";
+const VERSION = "1.0.4";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 const CryptoJS = require("crypto-js");
@@ -16,10 +16,11 @@ const API_HOSTS = [
 
 const PATH_SEARCH = "/wefeed-mobile-bff/subject-api/search";
 const PATH_RESOURCE = "/wefeed-mobile-bff/subject-api/resource";
+const PATH_PLAY_INFO = "/wefeed-mobile-bff/subject-api/play-info";
 const PATH_BOOTSTRAP = "/wefeed-mobile-bff/tab-operating";
 const SECRET_KEY_B64 = "76iRl07s0xSN9jqmEWAt79EBJZulIQIsV64FZr2O";
-const VERSION_CODE = 50020044;
-const VERSION_NAME = "3.0.03.0529.03";
+const VERSION_CODE = 50020118;
+const VERSION_NAME = "4.0.01.0807.03";
 const MOBILE_UA = "com.community.oneroom/" + VERSION_CODE + " (Linux; U; Android 13; en_US; 23078RKD5C; Build/TQ2A.230405.003; Cronet/135.0.7012.3)";
 
 var SESSION = {
@@ -458,6 +459,118 @@ function uniqueCandidates(items) {
   return out;
 }
 
+
+function isPlayableMediaUrl(url) {
+  var s = String(url || "").trim();
+  if (!/^https?:\/\//i.test(s)) return false;
+  return /(?:\.m3u8|\.mp4|\.m4v|\.mpd|\/resource\/|hakunaymatata\.com|aoneroom\.com\/.*(?:video|stream))/i.test(s);
+}
+
+function collectPlayableUrls(value, out, depth) {
+  out = out || [];
+  depth = Number(depth || 0);
+  if (depth > 6 || value == null) return out;
+  if (typeof value === "string") {
+    if (isPlayableMediaUrl(value) && out.indexOf(value) < 0) out.push(value);
+    return out;
+  }
+  if (Array.isArray(value)) {
+    value.forEach(function (v) { collectPlayableUrls(v, out, depth + 1); });
+    return out;
+  }
+  if (typeof value === "object") {
+    Object.keys(value).forEach(function (key) {
+      var v = value[key];
+      if (typeof v === "string" && /^(?:url|streamUrl|playUrl|videoUrl|file|src|link|resourceLink|downloadUrl)$/i.test(key)) {
+        if (isPlayableMediaUrl(v) && out.indexOf(v) < 0) out.push(v);
+      } else if (v && (typeof v === "object" || Array.isArray(v))) {
+        collectPlayableUrls(v, out, depth + 1);
+      }
+    });
+  }
+  return out;
+}
+
+function candidateRank(a, b) {
+  var am = Number(a && a.requireMemberType || 0);
+  var bm = Number(b && b.requireMemberType || 0);
+  if (am !== bm) return am - bm;
+  var ar = Number(a && (a.resolution || a._requestedResolution) || 0);
+  var br = Number(b && (b.resolution || b._requestedResolution) || 0);
+  if (ar !== br) return br - ar;
+  var ad = candidateDuration(a), bd = candidateDuration(b);
+  if (ad !== bd) return bd - ad;
+  return candidateSize(b) - candidateSize(a);
+}
+
+function resolveViaPlayInfo(items, subjectId, mediaType, season, episode) {
+  var candidates = uniqueCandidates(items).slice().sort(candidateRank).slice(0, 6);
+  if (!candidates.length) return Promise.resolve([]);
+  var se = mediaType === "tv" ? Number(season || 1) : 0;
+  var ep = mediaType === "tv" ? Number(episode || 1) : 0;
+
+  function tryCandidate(i) {
+    if (i >= candidates.length) return Promise.resolve([]);
+    var item = candidates[i];
+    var resolution = Number(item.resolution || item._requestedResolution || 0);
+    var resourceId = String(item.resourceId || "").trim();
+    if (!resourceId) return tryCandidate(i + 1);
+
+    console.log("[MovieBox] candidate #" + (i + 1) +
+      " resourceId=" + resourceId +
+      " q=" + resolution +
+      " member=" + Number(item.requireMemberType || 0) +
+      " linkType=" + Number(item.linkType || 0) +
+      " apiMB=" + Math.round(candidateSize(item) / 1048576));
+
+    function callPlayInfo(qualityValue, secondTry) {
+      return apiCall(PATH_PLAY_INFO, "GET", {
+        subjectId: subjectId,
+        se: se,
+        ep: ep,
+        quality: qualityValue,
+        resourceId: resourceId
+      }, null).then(function (result) {
+        var data = result && result.data ? result.data : null;
+        var urls = collectPlayableUrls(data, [], 0);
+        console.log("[MovieBox] play-info resourceId=" + resourceId +
+          " quality=" + String(qualityValue) +
+          " host=" + (result ? result.host : "none") +
+          " urls=" + urls.length);
+        if (!urls.length && !secondTry && resolution) {
+          return callPlayInfo(resolution + "p", true);
+        }
+        if (!urls.length) return tryCandidate(i + 1);
+
+        var url = urls[0];
+        var quality = resolution ? resolution + "p" : "Auto";
+        console.log("[MovieBox] selected play-info stream q=" + quality +
+          " resourceId=" + resourceId +
+          " cdn=" + String(url).replace(/^https?:\/\//i, "").split("/")[0]);
+        return [{
+          name: PROVIDER,
+          title: "MovieBox • " + quality + " • Direct",
+          url: url,
+          quality: quality,
+          headers: {
+            "User-Agent": "ExoPlayerLib/2.19.1",
+            "Accept": "*/*",
+            "Referer": "https://api6.aoneroom.com/"
+          }
+        }];
+      }).catch(function (error) {
+        console.log("[MovieBox] play-info error resourceId=" + resourceId +
+          " error=" + (error && error.message ? error.message : String(error)));
+        return tryCandidate(i + 1);
+      });
+    }
+
+    return callPlayInfo(resolution || 720, false);
+  }
+
+  return tryCandidate(0);
+}
+
 function selectPlayableByActualSize(items, mediaType) {
   var unique = uniqueCandidates(items);
   if (!unique.length) return Promise.resolve([]);
@@ -519,6 +632,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
   console.log("[MovieBox] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : ""));
 
   var info = null;
+  var matchedSubjectId = null;
   return getTmdbDetails(tmdbId, mediaType)
     .then(function (details) {
       info = tmdbInfo(details || {}, mediaType);
@@ -531,12 +645,13 @@ function getStreams(tmdbId, mediaType, season, episode) {
         console.log("[MovieBox] title not found");
         return null;
       }
-      console.log("[MovieBox] matched title='" + String(item.title || "") + "' year=" + parseYear(item.releaseDate) + " id=" + String(item.subjectId || ""));
+      matchedSubjectId = String(item.subjectId || "").trim();
+      console.log("[MovieBox] matched title='" + String(item.title || "") + "' year=" + parseYear(item.releaseDate) + " id=" + matchedSubjectId);
       return loadStreams(item, mediaType, season, episode);
     })
     .then(function (items) {
       if (!items) return [];
-      return selectPlayableByActualSize(items, mediaType);
+      return resolveViaPlayInfo(items, matchedSubjectId, mediaType, season, episode);
     })
     .then(function (streams) {
       streams = streams || [];

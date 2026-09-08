@@ -106,8 +106,8 @@
     {
       "id": "moviebox",
       "name": "MovieBox",
-      "description": "MovieBox movies, TV series, anime and Asian drama provider",
-      "version": "1.0.0",
+      "description": "MovieBox mobile API movies and TV provider",
+      "version": "1.0.1",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

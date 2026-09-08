@@ -106,8 +106,8 @@
     {
       "id": "moviebox",
       "name": "MovieBox",
-      "description": "MovieBox mobile API provider with Nigeria geo pin, full resource pagination and verified direct resource links",
-      "version": "1.0.5",
+      "description": "MovieBox mobile API provider with global carrier parity, PlayInfo signCookie support and direct resource fallback",
+      "version": "1.0.6",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

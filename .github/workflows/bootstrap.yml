@@ -1,13 +1,20 @@
-name: Bootstrap Nuvio Provider Workspace
+name: Validate Nuvio Plugin
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
+  push:
+    branches:
+      - main
+    paths:
+      - "manifest.json"
+      - "providers/**"
+      - "src/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
 
 jobs:
-  bootstrap:
+  validate:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,123 +25,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Fix repository manifest format
-        shell: bash
-        run: |
-          set -e
-          mkdir -p scripts providers
-
-          node <<'EOF'
-          const fs = require("fs");
-
-          const file = "manifest.json";
-          let current = fs.existsSync(file)
-            ? JSON.parse(fs.readFileSync(file, "utf8"))
-            : [];
-
-          let manifest;
-
-          if (Array.isArray(current)) {
-            manifest = {
-              name: "Luckez12 Plugins",
-              version: "1.0",
-              scrapers: current
-            };
-          } else if (current && typeof current === "object") {
-            manifest = current;
-
-            if (!manifest.name) manifest.name = "Luckez12 Plugins";
-            if (!manifest.version) manifest.version = "1.0";
-
-            if (!Array.isArray(manifest.scrapers)) {
-              manifest.scrapers = [];
-            }
-          } else {
-            throw new Error("Invalid manifest.json");
-          }
-
-          fs.writeFileSync(
-            file,
-            JSON.stringify(manifest, null, 2) + "\n"
-          );
-          EOF
-
-      - name: Replace validator with current repository schema
-        shell: bash
-        run: |
-          cat > scripts/validate-manifest.js <<'EOF'
-          const fs = require("fs");
-          const path = require("path");
-
-          const root = path.resolve(__dirname, "..");
-          const manifestPath = path.join(root, "manifest.json");
-
-          if (!fs.existsSync(manifestPath)) {
-            throw new Error("manifest.json not found");
-          }
-
-          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
-
-          if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
-            throw new Error("manifest.json root must be a JSON object");
-          }
-
-          if (typeof manifest.name !== "string" || !manifest.name.trim()) {
-            throw new Error("manifest.json missing repository name");
-          }
-
-          if (
-            (typeof manifest.version !== "string" && typeof manifest.version !== "number") ||
-            String(manifest.version).trim() === ""
-          ) {
-            throw new Error("manifest.json missing repository version");
-          }
-
-          if (!Array.isArray(manifest.scrapers)) {
-            throw new Error("manifest.json must contain a scrapers array");
-          }
-
-          const ids = new Set();
-
-          for (const item of manifest.scrapers) {
-            if (!item || typeof item !== "object" || Array.isArray(item)) {
-              throw new Error("Each scraper entry must be a JSON object");
-            }
-
-            for (const key of ["id", "name", "filename"]) {
-              if (typeof item[key] !== "string" || !item[key].trim()) {
-                throw new Error(`Scraper entry missing ${key}`);
-              }
-            }
-
-            if (ids.has(item.id)) {
-              throw new Error(`Duplicate scraper id: ${item.id}`);
-            }
-            ids.add(item.id);
-
-            const providerPath = path.resolve(root, item.filename);
-
-            if (!providerPath.startsWith(root + path.sep)) {
-              throw new Error(`Invalid provider path: ${item.filename}`);
-            }
-
-            if (!fs.existsSync(providerPath)) {
-              throw new Error(`Provider file missing: ${item.filename}`);
-            }
-
-            delete require.cache[require.resolve(providerPath)];
-            const provider = require(providerPath);
-
-            if (!provider || typeof provider.getStreams !== "function") {
-              throw new Error(`${item.filename} must export getStreams()`);
-            }
-          }
-
-          console.log(
-            `Manifest valid: ${manifest.name}, ${manifest.scrapers.length} scraper(s)`
-          );
-          EOF
 
       - name: Install dependencies
         if: ${{ hashFiles('package.json') != '' }}
@@ -147,25 +37,8 @@ jobs:
           if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
             npm run build
           else
-            echo "No build script. Skipping."
+            echo "No build script. Skipping build."
           fi
 
       - name: Validate manifest
         run: node scripts/validate-manifest.js
-
-      - name: Commit fixes
-        shell: bash
-        run: |
-          set -e
-
-          if [ -z "$(git status --porcelain)" ]; then
-            echo "No changes to commit."
-            exit 0
-          fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add manifest.json scripts/validate-manifest.js
-          git commit -m "Fix Nuvio repository schema validation"
-          git push

@@ -2,15 +2,6 @@ name: Bootstrap Nuvio Provider Workspace
 
 on:
   workflow_dispatch:
-    inputs:
-      provider_id:
-        description: "Optional provider ID"
-        required: false
-        default: ""
-      provider_name:
-        description: "Optional provider name"
-        required: false
-        default: ""
 
 permissions:
   contents: write
@@ -28,93 +19,120 @@ jobs:
         with:
           node-version: 20
 
-      - name: Ensure current Nuvio manifest format
+      - name: Fix repository manifest format
         shell: bash
         run: |
           set -e
-          mkdir -p src/_template providers scripts tests
+          mkdir -p scripts providers
 
           node <<'EOF'
           const fs = require("fs");
 
           const file = "manifest.json";
-          let manifest = {
-            name: "Luckez12 Plugins",
-            version: "1.0.0",
-            scrapers: []
-          };
+          let current = fs.existsSync(file)
+            ? JSON.parse(fs.readFileSync(file, "utf8"))
+            : [];
 
-          if (fs.existsSync(file)) {
-            const current = JSON.parse(fs.readFileSync(file, "utf8"));
+          let manifest;
 
-            if (Array.isArray(current)) {
-              manifest.scrapers = current;
-            } else if (current && typeof current === "object") {
-              manifest = current;
-              if (!manifest.name) manifest.name = "Luckez12 Plugins";
-              if (!manifest.version) manifest.version = "1.0.0";
-              if (!Array.isArray(manifest.scrapers)) manifest.scrapers = [];
+          if (Array.isArray(current)) {
+            manifest = {
+              name: "Luckez12 Plugins",
+              version: "1.0",
+              scrapers: current
+            };
+          } else if (current && typeof current === "object") {
+            manifest = current;
+
+            if (!manifest.name) manifest.name = "Luckez12 Plugins";
+            if (!manifest.version) manifest.version = "1.0";
+
+            if (!Array.isArray(manifest.scrapers)) {
+              manifest.scrapers = [];
+            }
+          } else {
+            throw new Error("Invalid manifest.json");
+          }
+
+          fs.writeFileSync(
+            file,
+            JSON.stringify(manifest, null, 2) + "\n"
+          );
+          EOF
+
+      - name: Replace validator with current repository schema
+        shell: bash
+        run: |
+          cat > scripts/validate-manifest.js <<'EOF'
+          const fs = require("fs");
+          const path = require("path");
+
+          const root = path.resolve(__dirname, "..");
+          const manifestPath = path.join(root, "manifest.json");
+
+          if (!fs.existsSync(manifestPath)) {
+            throw new Error("manifest.json not found");
+          }
+
+          const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+
+          if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
+            throw new Error("manifest.json root must be a JSON object");
+          }
+
+          if (typeof manifest.name !== "string" || !manifest.name.trim()) {
+            throw new Error("manifest.json missing repository name");
+          }
+
+          if (
+            (typeof manifest.version !== "string" && typeof manifest.version !== "number") ||
+            String(manifest.version).trim() === ""
+          ) {
+            throw new Error("manifest.json missing repository version");
+          }
+
+          if (!Array.isArray(manifest.scrapers)) {
+            throw new Error("manifest.json must contain a scrapers array");
+          }
+
+          const ids = new Set();
+
+          for (const item of manifest.scrapers) {
+            if (!item || typeof item !== "object" || Array.isArray(item)) {
+              throw new Error("Each scraper entry must be a JSON object");
+            }
+
+            for (const key of ["id", "name", "filename"]) {
+              if (typeof item[key] !== "string" || !item[key].trim()) {
+                throw new Error(`Scraper entry missing ${key}`);
+              }
+            }
+
+            if (ids.has(item.id)) {
+              throw new Error(`Duplicate scraper id: ${item.id}`);
+            }
+            ids.add(item.id);
+
+            const providerPath = path.resolve(root, item.filename);
+
+            if (!providerPath.startsWith(root + path.sep)) {
+              throw new Error(`Invalid provider path: ${item.filename}`);
+            }
+
+            if (!fs.existsSync(providerPath)) {
+              throw new Error(`Provider file missing: ${item.filename}`);
+            }
+
+            delete require.cache[require.resolve(providerPath)];
+            const provider = require(providerPath);
+
+            if (!provider || typeof provider.getStreams !== "function") {
+              throw new Error(`${item.filename} must export getStreams()`);
             }
           }
 
-          fs.writeFileSync(file, JSON.stringify(manifest, null, 2) + "\n");
-          EOF
-
-      - name: Register requested provider
-        if: ${{ inputs.provider_id != '' }}
-        shell: bash
-        env:
-          PROVIDER_ID: ${{ inputs.provider_id }}
-          PROVIDER_NAME: ${{ inputs.provider_name }}
-        run: |
-          set -e
-
-          if ! echo "$PROVIDER_ID" | grep -Eq '^[a-z0-9_-]+$'; then
-            echo "Invalid provider_id"
-            exit 1
-          fi
-
-          mkdir -p "src/$PROVIDER_ID"
-
-          if [ ! -f "src/$PROVIDER_ID/index.js" ]; then
-            cat > "src/$PROVIDER_ID/index.js" <<'EOF'
-          function getStreams(tmdbId, mediaType, season, episode) {
-            console.log("[provider]", { tmdbId, mediaType, season, episode });
-            return Promise.resolve([]);
-          }
-
-          module.exports = { getStreams };
-          EOF
-          fi
-
-          node <<'EOF'
-          const fs = require("fs");
-
-          const id = process.env.PROVIDER_ID;
-          const name = process.env.PROVIDER_NAME || id;
-          const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8"));
-
-          const entry = {
-            id,
-            name,
-            description: `${name} Nuvio provider`,
-            version: "1.0.0",
-            author: "Luckez12",
-            supportedTypes: ["movie", "tv"],
-            filename: `providers/${id}.js`,
-            enabled: true
-          };
-
-          const index = manifest.scrapers.findIndex(x => x.id === id);
-          if (index >= 0) manifest.scrapers[index] = {
-            ...manifest.scrapers[index],
-            ...entry
-          };
-          else manifest.scrapers.push(entry);
-
-          fs.writeFileSync(
-            "manifest.json",
-            JSON.stringify(manifest, null, 2) + "\n"
+          console.log(
+            `Manifest valid: ${manifest.name}, ${manifest.scrapers.length} scraper(s)`
           );
           EOF
 
@@ -124,13 +142,18 @@ jobs:
 
       - name: Build providers
         if: ${{ hashFiles('package.json') != '' }}
-        run: npm run build
+        shell: bash
+        run: |
+          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
+            npm run build
+          else
+            echo "No build script. Skipping."
+          fi
 
       - name: Validate manifest
-        if: ${{ hashFiles('scripts/validate-manifest.js') != '' }}
         run: node scripts/validate-manifest.js
 
-      - name: Commit changes
+      - name: Commit fixes
         shell: bash
         run: |
           set -e
@@ -143,6 +166,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add .
-          git commit -m "Fix Nuvio repository manifest format"
+          git add manifest.json scripts/validate-manifest.js
+          git commit -m "Fix Nuvio repository schema validation"
           git push

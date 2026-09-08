@@ -65,7 +65,7 @@ function isDirectVideo(url) {
 function fetchTmdbDetails(tmdbId, mediaType) {
   const type = mediaType === "movie" ? "movie" : "tv";
   const url = TMDB_BASE + "/" + type + "/" + encodeURIComponent(tmdbId) +
-    "?api_key=" + TMDB_API_KEY + "&append_to_response=external_ids";
+    "?api_key=" + TMDB_API_KEY + "&append_to_response=external_ids,alternative_titles";
 
   return fetchJson(url, {
     headers: {
@@ -74,31 +74,44 @@ function fetchTmdbDetails(tmdbId, mediaType) {
     }
   }).then(function (data) {
     if (!data) return null;
+    const altRoot = data.alternative_titles || {};
+    const altItems = type === "movie"
+      ? (Array.isArray(altRoot.titles) ? altRoot.titles : [])
+      : (Array.isArray(altRoot.results) ? altRoot.results : []);
+
+    const alternativeTitles = altItems
+      .map(function (x) { return x && x.title ? String(x.title).trim() : ""; })
+      .filter(Boolean);
+
     return {
       title: type === "movie" ? (data.title || data.original_title) : (data.name || data.original_name),
       originalTitle: data.original_title || data.original_name || "",
-      year: String(data.release_date || data.first_air_date || "").slice(0, 4)
+      year: String(data.release_date || data.first_air_date || "").slice(0, 4),
+      alternativeTitles: alternativeTitles
     };
   });
 }
 
 function buildQueries(details, mediaType, season) {
   const out = [];
+
   function add(value) {
     value = String(value || "").trim();
     if (value && out.indexOf(value) === -1) out.push(value);
   }
 
+  const titles = [details.title, details.originalTitle]
+    .concat(Array.isArray(details.alternativeTitles) ? details.alternativeTitles : [])
+    .filter(Boolean);
+
   if (mediaType === "tv" && Number(season || 1) > 1) {
-    add(details.title + " Season " + season);
-    add(details.originalTitle + " Season " + season);
-    add(details.title + " " + season);
-    add(details.originalTitle + " " + season);
+    titles.forEach(function (title) {
+      add(title + " Season " + Number(season));
+    });
   }
 
-  add(details.title);
-  add(details.originalTitle);
-  return out;
+  titles.forEach(add);
+  return out.slice(0, 12);
 }
 
 function searchBase(base, query) {
@@ -132,11 +145,13 @@ function searchWorkingBase(queries) {
 
 function collectCandidates(base, queries, firstItems) {
   const map = {};
+
   (firstItems || []).forEach(function (item) {
     if (item && item.id != null) map[String(item.id)] = item;
   });
 
   let chain = Promise.resolve();
+
   queries.slice(1).forEach(function (query) {
     chain = chain.then(function () {
       return searchBase(base, query).then(function (items) {
@@ -147,29 +162,77 @@ function collectCandidates(base, queries, firstItems) {
     });
   });
 
-  return chain.then(function () { return Object.keys(map).map(function (k) { return map[k]; }); });
+  return chain.then(function () {
+    return Object.keys(map).map(function (key) { return map[key]; });
+  });
 }
 
-function quickScore(item, details, mediaType, season) {
-  const title = normalizeTitle(item && item.title);
-  const target = normalizeTitle(details.title);
-  const original = normalizeTitle(details.originalTitle);
-  let score = 0;
+function acceptedTitles(details, mediaType, season) {
+  const set = {};
 
-  if (title === target || (original && title === original)) score += 100;
-  else if (title.indexOf(target) !== -1 || target.indexOf(title) !== -1) score += 45;
-
-  const type = String(item && item.type || "").toLowerCase();
-  if (mediaType === "movie") {
-    if (type === "movie" || type === "film") score += 25;
-    else if (type) score -= 25;
-  } else {
-    if (type !== "movie" && type !== "film") score += 15;
+  function add(value) {
+    const normalized = normalizeTitle(value);
+    if (normalized) set[normalized] = true;
   }
 
+  const titles = [details.title, details.originalTitle]
+    .concat(Array.isArray(details.alternativeTitles) ? details.alternativeTitles : [])
+    .filter(Boolean);
+
+  titles.forEach(add);
+
   if (mediaType === "tv" && Number(season || 1) > 1) {
-    const seasonNorm = "season " + Number(season);
-    if (title.indexOf(seasonNorm) !== -1 || title.endsWith(" " + Number(season))) score += 35;
+    titles.forEach(function (title) {
+      add(title + " Season " + Number(season));
+    });
+  }
+
+  if (details.year) {
+    titles.forEach(function (title) {
+      add(title + " " + details.year);
+    });
+  }
+
+  return set;
+}
+
+function isCorrectMediaType(detail, mediaType) {
+  const type = String(detail && detail.type || "").trim().toLowerCase();
+  const isMovie = type === "movie" || type === "film";
+
+  if (mediaType === "movie") return isMovie;
+  return !isMovie;
+}
+
+function strictMatch(detail, item, details, mediaType, season) {
+  if (!detail) return null;
+  if (!isCorrectMediaType(detail, mediaType)) return null;
+
+  const validTitles = acceptedTitles(details, mediaType, season);
+  const detailTitle = normalizeTitle(detail.title);
+  const itemTitle = normalizeTitle(item && item.title);
+
+  if (!validTitles[detailTitle] && !validTitles[itemTitle]) {
+    return null;
+  }
+
+  const targetYear = String(details.year || "").slice(0, 4);
+  const resultYear = String(detail.releaseDate || "").slice(0, 4);
+
+  // If both sides provide a year, it must be the same.
+  if (targetYear && resultYear && targetYear !== resultYear) {
+    return null;
+  }
+
+  let score = 100;
+
+  if (targetYear && resultYear && targetYear === resultYear) score += 50;
+  if (detailTitle === normalizeTitle(details.title)) score += 25;
+  if (detailTitle === normalizeTitle(details.originalTitle)) score += 15;
+
+  if (mediaType === "tv" && Number(season || 1) > 1) {
+    const seasonTitle = normalizeTitle(details.title + " Season " + Number(season));
+    if (detailTitle === seasonTitle || itemTitle === seasonTitle) score += 25;
   }
 
   return score;
@@ -185,44 +248,33 @@ function fetchDetail(base, id) {
   });
 }
 
-function detailScore(detail, item, details, mediaType, season) {
-  let score = quickScore(item, details, mediaType, season);
-  if (!detail) return -999;
-
-  const year = String(detail.releaseDate || "").slice(0, 4);
-  if (details.year && year) {
-    if (details.year === year) score += 35;
-    else score -= 10;
-  }
-
-  const type = String(detail.type || "").toLowerCase();
-  if (mediaType === "movie") {
-    if (type === "movie" || type === "film") score += 20;
-    else score -= 40;
-  } else if (type === "movie" || type === "film") {
-    score -= 40;
-  }
-
-  return score;
-}
-
 function chooseBestMatch(base, candidates, details, mediaType, season) {
-  const ranked = (candidates || [])
-    .map(function (item) { return { item: item, score: quickScore(item, details, mediaType, season) }; })
-    .sort(function (a, b) { return b.score - a.score; })
-    .slice(0, 6);
-
-  return Promise.all(ranked.map(function (entry) {
-    return fetchDetail(base, entry.item.id).then(function (detail) {
+  return Promise.all((candidates || []).slice(0, 30).map(function (item) {
+    return fetchDetail(base, item.id).then(function (detail) {
       return {
-        item: entry.item,
+        item: item,
         detail: detail,
-        score: detailScore(detail, entry.item, details, mediaType, season)
+        score: strictMatch(detail, item, details, mediaType, season)
       };
     });
   })).then(function (items) {
-    items.sort(function (a, b) { return b.score - a.score; });
-    return items.length && items[0].score >= 60 ? items[0] : null;
+    const valid = items
+      .filter(function (x) { return typeof x.score === "number"; })
+      .sort(function (a, b) { return b.score - a.score; });
+
+    if (!valid.length) {
+      console.log("[KissKH] No strict title/year/type match");
+      return null;
+    }
+
+    const best = valid[0];
+    console.log(
+      "[KissKH] Matched id=" + best.item.id +
+      " title=" + String(best.detail.title || best.item.title || "") +
+      " year=" + String(best.detail.releaseDate || "").slice(0, 4)
+    );
+
+    return best;
   });
 }
 

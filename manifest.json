@@ -6,7 +6,7 @@
       "id": "kisskh",
       "name": "KissKH",
       "description": "KissKH Asian dramas and movies",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",
@@ -19,7 +19,6 @@
         "m3u8",
         "mp4"
       ],
-      "logo": "https://www.google.com/s2/favicons?domain=kisskh.do&sz=128",
       "contentLanguage": [
         "ko",
         "zh",

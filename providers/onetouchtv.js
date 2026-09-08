@@ -15,9 +15,81 @@ function fetchText(url, options) {
   });
 }
 
+function sanitizeJsonControls(input) {
+  var text = String(input == null ? "" : input).replace(/^\uFEFF/, "");
+  var out = "";
+  var inString = false;
+  var escaped = false;
+
+  for (var i = 0; i < text.length; i++) {
+    var ch = text.charAt(i);
+    var code = text.charCodeAt(i);
+
+    if (inString) {
+      if (escaped) {
+        out += ch;
+        escaped = false;
+        continue;
+      }
+
+      if (ch === "\\") {
+        out += ch;
+        escaped = true;
+        continue;
+      }
+
+      if (ch === '"') {
+        out += ch;
+        inString = false;
+        continue;
+      }
+
+      if (code < 0x20) {
+        out += "\\u" + ("000" + code.toString(16)).slice(-4);
+        continue;
+      }
+
+      out += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+
+    if (code < 0x20 && ch !== "\n" && ch !== "\r" && ch !== "\t") {
+      out += " ";
+      continue;
+    }
+
+    out += ch;
+  }
+
+  return out;
+}
+
+function parseJsonLenient(input, label) {
+  var text = String(input == null ? "" : input).trim();
+
+  try {
+    return JSON.parse(text);
+  } catch (firstError) {
+    try {
+      return JSON.parse(sanitizeJsonControls(text));
+    } catch (secondError) {
+      throw new Error(
+        (label || "payload") + " JSON parse failed: " +
+        (secondError && secondError.message ? secondError.message : String(secondError))
+      );
+    }
+  }
+}
+
 function fetchJson(url, options) {
   return fetchText(url, options).then(function (text) {
-    return JSON.parse(text);
+    return parseJsonLenient(text, "TMDB");
   });
 }
 
@@ -54,11 +126,17 @@ function decryptString(encrypted) {
   });
   var plain = decrypted.toString(CryptoJS.enc.Utf8);
   if (!plain) throw new Error("empty decrypted payload");
-  var wrapper = JSON.parse(plain);
-  if (!wrapper || typeof wrapper.result !== "string") {
+
+  var wrapper = parseJsonLenient(plain, "encrypted wrapper");
+  if (!wrapper || wrapper.result == null) {
     throw new Error("decrypted payload missing result");
   }
-  return wrapper.result;
+
+  if (typeof wrapper.result === "string") {
+    return wrapper.result;
+  }
+
+  return JSON.stringify(wrapper.result);
 }
 
 function getDecryptedJson(url) {
@@ -69,7 +147,7 @@ function getDecryptedJson(url) {
       "User-Agent": USER_AGENT
     }
   }).then(function (raw) {
-    return JSON.parse(decryptString(raw));
+    return parseJsonLenient(decryptString(raw), "decrypted result");
   });
 }
 
@@ -140,6 +218,8 @@ function buildQueries(details, mediaType, season) {
     titles.slice(0, 4).forEach(function (title) {
       add(title + " Season " + Number(season));
       add(title + " S" + String(Number(season)).padStart(2, "0"));
+      add(title + " " + Number(season));
+      add(title + " " + Number(season));
     });
   }
 
@@ -197,6 +277,8 @@ function targetTitles(details, mediaType, season) {
     titles.forEach(function (title) {
       add(title + " Season " + Number(season));
       add(title + " S" + String(Number(season)).padStart(2, "0"));
+      add(title + " " + Number(season));
+      add(title + " " + Number(season));
     });
   }
 
@@ -397,7 +479,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (payload) {
       var streams = parseStreams(payload);
-      console.log("[OneTouchTV] playable sources=" + streams.length);
+      console.log("[OneTouchTV] v1.0.1 playable sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

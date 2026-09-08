@@ -196,17 +196,39 @@ function acceptedTitles(details, mediaType, season) {
   return set;
 }
 
-function isCorrectMediaType(detail, mediaType) {
-  const type = String(detail && detail.type || "").trim().toLowerCase();
-  const isMovie = type === "movie" || type === "film";
+function isCorrectMediaType(detail, item, mediaType) {
+  const values = [
+    String(detail && detail.type || "").trim().toLowerCase(),
+    String(item && item.type || "").trim().toLowerCase()
+  ].filter(Boolean);
 
-  if (mediaType === "movie") return isMovie;
-  return !isMovie;
+  if (!values.length) return true;
+
+  const saysMovie = values.some(function (type) {
+    return type === "movie" || type === "film";
+  });
+
+  const saysSeries = values.some(function (type) {
+    return type === "tv" ||
+      type === "series" ||
+      type === "tvseries" ||
+      type === "drama" ||
+      type === "anime";
+  });
+
+  if (mediaType === "movie") {
+    if (saysMovie) return true;
+    if (saysSeries) return false;
+    return true;
+  }
+
+  if (saysMovie) return false;
+  return true;
 }
 
 function strictMatch(detail, item, details, mediaType, season) {
   if (!detail) return null;
-  if (!isCorrectMediaType(detail, mediaType)) return null;
+  if (!isCorrectMediaType(detail, item, mediaType)) return null;
 
   const validTitles = acceptedTitles(details, mediaType, season);
   const detailTitle = normalizeTitle(detail.title);
@@ -219,14 +241,20 @@ function strictMatch(detail, item, details, mediaType, season) {
   const targetYear = String(details.year || "").slice(0, 4);
   const resultYear = String(detail.releaseDate || "").slice(0, 4);
 
-  // If both sides provide a year, it must be the same.
-  if (targetYear && resultYear && targetYear !== resultYear) {
-    return null;
+  // Some titles use festival/premiere year while TMDB UI uses wide-release year.
+  // Keep matching safe by allowing only a one-year difference.
+  if (targetYear && resultYear) {
+    const diff = Math.abs(Number(targetYear) - Number(resultYear));
+    if (!Number.isFinite(diff) || diff > 1) return null;
   }
 
   let score = 100;
 
-  if (targetYear && resultYear && targetYear === resultYear) score += 50;
+  if (targetYear && resultYear) {
+    const diff = Math.abs(Number(targetYear) - Number(resultYear));
+    if (diff === 0) score += 50;
+    else if (diff === 1) score += 20;
+  }
   if (detailTitle === normalizeTitle(details.title)) score += 25;
   if (detailTitle === normalizeTitle(details.originalTitle)) score += 15;
 
@@ -263,7 +291,18 @@ function chooseBestMatch(base, candidates, details, mediaType, season) {
       .sort(function (a, b) { return b.score - a.score; });
 
     if (!valid.length) {
-      console.log("[KissKH] No strict title/year/type match");
+      const sample = items.slice(0, 8).map(function (x) {
+        const title = String((x.detail && x.detail.title) || (x.item && x.item.title) || "");
+        const year = String((x.detail && x.detail.releaseDate) || "").slice(0, 4);
+        const type = String((x.detail && x.detail.type) || (x.item && x.item.type) || "");
+        return title + (year ? " (" + year + ")" : "") + (type ? " [" + type + "]" : "");
+      }).join(" | ");
+
+      console.log(
+        "[KissKH] No strict match for " +
+        details.title + " (" + (details.year || "?") + ")" +
+        (sample ? " candidates=" + sample : "")
+      );
       return null;
     }
 

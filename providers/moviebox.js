@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.0.2";
+const VERSION = "1.0.3";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 const CryptoJS = require("crypto-js");
@@ -405,41 +405,102 @@ function candidateScore(item) {
   return score;
 }
 
-function formatResults(items) {
-  var groups = {};
-  var seenUrl = {};
-  var out = [];
+function parseTotalBytesFromHeaders(res) {
+  try {
+    if (!res || !res.headers || !res.headers.get) return 0;
+    var cr = String(res.headers.get("content-range") || "");
+    var m = cr.match(/\/(\d+)\s*$/);
+    if (m) return Number(m[1]) || 0;
+    var cl = Number(res.headers.get("content-length") || 0);
+    return isFinite(cl) && cl > 0 ? cl : 0;
+  } catch (_) {
+    return 0;
+  }
+}
 
-  (items || []).forEach(function (item) {
-    var url = String(item.resourceLink || item.url || "").trim();
-    if (!/^https?:\/\//i.test(url) || seenUrl[url]) return;
-    seenUrl[url] = true;
-    var resolution = Number(item.resolution || item._requestedResolution || 0);
-    var key = resolution > 0 ? String(resolution) : "0";
-    if (!groups[key]) groups[key] = [];
-    groups[key].push(item);
+function probeCandidate(item, index) {
+  var url = String(item && (item.resourceLink || item.url) || "").trim();
+  if (!/^https?:\/\//i.test(url)) return Promise.resolve({ item: item, bytes: 0, status: 0, index: index });
+
+  return fetch(url, {
+    method: "GET",
+    headers: {
+      "User-Agent": MOBILE_UA,
+      "Accept": "*/*",
+      "Range": "bytes=0-0"
+    }
+  }).then(function (res) {
+    var bytes = parseTotalBytesFromHeaders(res);
+    console.log("[MovieBox] CDN probe #" + index + " status=" + res.status +
+      " totalMB=" + (bytes ? Math.round(bytes / 1048576) : 0) +
+      " apiDuration=" + candidateDuration(item) +
+      " apiSize=" + candidateSize(item) +
+      " resolution=" + Number(item.resolution || item._requestedResolution || 0));
+    return { item: item, bytes: bytes, status: res.status, index: index };
+  }).catch(function (error) {
+    console.log("[MovieBox] CDN probe #" + index + " fail=" + (error && error.message ? error.message : String(error)));
+    return { item: item, bytes: 0, status: 0, index: index };
   });
+}
 
-  Object.keys(groups).sort(function (a, b) { return Number(b) - Number(a); }).forEach(function (key) {
-    var candidates = groups[key].slice().sort(function (a, b) {
-      return candidateScore(b) - candidateScore(a);
+function uniqueCandidates(items) {
+  var seen = {};
+  var out = [];
+  (items || []).forEach(function (item) {
+    var url = String(item && (item.resourceLink || item.url) || "").trim();
+    if (!/^https?:\/\//i.test(url)) return;
+    var rid = String(item && item.resourceId || "").trim();
+    var key = rid ? "rid:" + rid : "url:" + url;
+    if (seen[key]) return;
+    seen[key] = true;
+    out.push(item);
+  });
+  return out;
+}
+
+function selectPlayableByActualSize(items, mediaType) {
+  var unique = uniqueCandidates(items);
+  if (!unique.length) return Promise.resolve([]);
+
+  // Current MovieBox responses can include a short official install/update
+  // notice beside the real movie. Metadata is not always reliable, so probe
+  // the signed CDN URLs and rank using the real file size from Content-Range.
+  var probeList = unique.slice(0, 8);
+  return Promise.all(probeList.map(function (item, i) {
+    return probeCandidate(item, i + 1);
+  })).then(function (results) {
+    var usable = results.filter(function (r) {
+      return r && r.item && !isNoticeCandidate(r.item) && (r.status === 200 || r.status === 206 || r.bytes > 0);
     });
-    if (!candidates.length) return;
+    if (!usable.length) usable = results.filter(function (r) { return r && r.item; });
+    if (!usable.length) return [];
 
-    var item = candidates[0];
+    usable.sort(function (a, b) {
+      var byteDiff = Number(b.bytes || 0) - Number(a.bytes || 0);
+      if (byteDiff) return byteDiff;
+      var durationDiff = candidateDuration(b.item) - candidateDuration(a.item);
+      if (durationDiff) return durationDiff;
+      return candidateSize(b.item) - candidateSize(a.item);
+    });
+
+    var best = usable[0];
+    var item = best.item;
     var url = String(item.resourceLink || item.url || "").trim();
-    var resolution = Number(item.resolution || item._requestedResolution || key || 0);
+    var resolution = Number(item.resolution || item._requestedResolution || 0);
     var quality = resolution ? resolution + "p" : "Auto";
-    var dur = candidateDuration(item);
-    var size = candidateSize(item);
-    var host = "unknown";
-    try { host = url.replace(/^https?:\/\//i, "").split("/")[0]; } catch (_) {}
+    var actualMb = best.bytes ? Math.round(best.bytes / 1048576) : 0;
 
-    console.log("[MovieBox] select " + quality + " candidates=" + candidates.length +
-      " duration=" + dur + " size=" + size + " linkType=" + String(item.linkType == null ? "?" : item.linkType) +
-      " host=" + host + (isNoticeCandidate(item) ? " notice=yes" : " notice=no"));
+    // If there is a clearly full-length candidate, never return tiny notice clips.
+    var fullThreshold = mediaType === "movie" ? 25 * 1024 * 1024 : 12 * 1024 * 1024;
+    var hasFull = usable.some(function (r) { return Number(r.bytes || 0) >= fullThreshold; });
+    if (hasFull && Number(best.bytes || 0) < fullThreshold) return [];
 
-    out.push({
+    console.log("[MovieBox] selected actual stream index=" + best.index +
+      " quality=" + quality + " actualMB=" + actualMb +
+      " duration=" + candidateDuration(item) +
+      " resourceId=" + String(item.resourceId || "?"));
+
+    return [{
       name: PROVIDER,
       title: "MovieBox • " + quality + " • MP4",
       url: url,
@@ -448,11 +509,9 @@ function formatResults(items) {
         "User-Agent": MOBILE_UA,
         "Accept": "*/*"
       }
-    });
+    }];
   });
-  return out;
 }
-
 function getStreams(tmdbId, mediaType, season, episode) {
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
@@ -477,7 +536,10 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (items) {
       if (!items) return [];
-      var streams = formatResults(items);
+      return selectPlayableByActualSize(items, mediaType);
+    })
+    .then(function (streams) {
+      streams = streams || [];
       console.log("[MovieBox] v" + VERSION + " playable sources=" + streams.length);
       return streams;
     })

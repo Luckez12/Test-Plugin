@@ -57,7 +57,7 @@
       "id": "msm21",
       "name": "MSM21",
       "description": "Malay subtitle movies and TV provider",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

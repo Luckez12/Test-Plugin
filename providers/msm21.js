@@ -63,31 +63,11 @@ function absoluteUrl(base, value) {
 }
 
 function resolveBase() {
-  if (resolvedBasePromise) return resolvedBasePromise;
-
-  var index = 0;
-
-  function next() {
-    if (index >= BASE_CANDIDATES.length) {
-      throw new Error("MSM21 base URL unavailable");
-    }
-
-    var base = BASE_CANDIDATES[index++];
-    return fetchResponse(base + "/", {
-      headers: {
-        "Accept": "text/html,*/*",
-        "User-Agent": USER_AGENT
-      }
-    }).then(function (response) {
-      var resolved = originOf(response.url || base);
-      console.log("[MSM21] base=" + resolved);
-      return resolved;
-    }).catch(function () {
-      return next();
-    });
+  // The current MSM21 domain is already known. Avoid a homepage probe because
+  // VUEO gives providers a short scan budget and that probe can cost 1-2s.
+  if (!resolvedBasePromise) {
+    resolvedBasePromise = Promise.resolve(BASE_CANDIDATES[0]);
   }
-
-  resolvedBasePromise = Promise.resolve().then(next);
   return resolvedBasePromise;
 }
 
@@ -159,6 +139,109 @@ function buildQueries(details) {
 
   (details.alternativeTitles || []).slice(0, 3).forEach(add);
   return out.slice(0, 5);
+}
+
+function slugifyTitle(value) {
+  var text = String(value || "").trim().toLowerCase();
+  try {
+    text = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  } catch (_) {}
+
+  return text
+    .replace(/&/g, " and ")
+    .replace(/[’'`]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-+/g, "-");
+}
+
+function parsePageIdentity(html) {
+  var cheerio = getCheerio();
+  var $ = cheerio.load(String(html || ""));
+  var rawTitle = String(
+    $(".details-title h3").first().text() ||
+    $("meta[property='og:title']").attr("content") ||
+    $("title").first().text() ||
+    ""
+  ).replace(/\s+/g, " ").trim();
+
+  rawTitle = rawTitle
+    .replace(/\s*[-–|]\s*movisubmalay(?:\.org)?\s*$/i, "")
+    .trim();
+
+  var year = yearFromTitle(rawTitle);
+  if (!year) {
+    $(".details-info p").each(function (_, el) {
+      if (year) return;
+      var row = $(el);
+      var strong = String(row.find("strong").first().text() || "")
+        .trim().replace(/:$/, "");
+      if (/^year$/i.test(strong)) {
+        var m = String(row.text() || "").match(/((?:19|20)\d{2})/);
+        if (m) year = Number(m[1]);
+      }
+    });
+  }
+
+  return {
+    title: stripYear(rawTitle),
+    rawTitle: rawTitle,
+    year: year
+  };
+}
+
+function validateDirectPage(html, details, mediaType) {
+  var identity = parsePageIdentity(html);
+  if (!identity.title) return null;
+
+  var accepted = acceptedTitleSet(details);
+  if (!accepted[normalizeTitle(identity.title)]) return null;
+
+  var targetYear = Number(details.year || 0);
+  var itemYear = Number(identity.year || 0);
+  if (
+    mediaType === "movie" &&
+    targetYear && itemYear &&
+    Math.abs(targetYear - itemYear) > 1
+  ) {
+    return null;
+  }
+
+  return identity;
+}
+
+function tryDirectTitlePage(base, details, mediaType) {
+  var slug = slugifyTitle(details.title || details.originalTitle || "");
+  if (!slug) return Promise.resolve(null);
+
+  var year = String(details.year || "").trim();
+  var path = mediaType === "movie"
+    ? "/movies/" + slug + (year ? "-" + year : "") + "/"
+    : "/tvshows/" + slug + "/";
+  var url = base + path;
+
+  return fetchText(url, {
+    headers: {
+      "Accept": "text/html,*/*",
+      "Referer": base + "/",
+      "User-Agent": USER_AGENT
+    }
+  }).then(function (html) {
+    var identity = validateDirectPage(html, details, mediaType);
+    if (!identity) return null;
+
+    console.log("[MSM21] fast title='" + identity.rawTitle + "' url=" + url);
+    return {
+      title: identity.title,
+      rawTitle: identity.rawTitle,
+      year: identity.year,
+      url: url,
+      mediaType: mediaType,
+      html: html
+    };
+  }).catch(function () {
+    return null;
+  });
 }
 
 function parseSearchResults(html, pageUrl) {
@@ -251,36 +334,13 @@ function scoreCandidate(item, details, mediaType) {
 
 function findBestTitle(base, details, mediaType) {
   var queries = buildQueries(details);
+  var index = 0;
+  var seen = {};
 
-  return Promise.all(queries.map(function (query) {
-    return searchSite(base, query).catch(function (error) {
-      console.log("[MSM21] search failed query='" + query + "' error=" + error.message);
-      return [];
-    });
-  })).then(function (groups) {
-    var map = {};
-
-    groups.forEach(function (items) {
-      items.forEach(function (item) {
-        if (!map[item.url]) map[item.url] = item;
-      });
-    });
-
-    var ranked = Object.keys(map).map(function (key) {
-      var item = map[key];
-      return {
-        item: item,
-        score: scoreCandidate(item, details, mediaType)
-      };
-    }).filter(function (x) {
-      return typeof x.score === "number";
-    }).sort(function (a, b) {
-      return b.score - a.score;
-    });
-
-    if (!ranked.length) {
-      var sample = Object.keys(map).slice(0, 8).map(function (key) {
-        var x = map[key];
+  function next() {
+    if (index >= queries.length) {
+      var sample = Object.keys(seen).slice(0, 8).map(function (key) {
+        var x = seen[key];
         return x.rawTitle + " [" + x.mediaType + "]";
       }).join(" | ");
 
@@ -288,15 +348,45 @@ function findBestTitle(base, details, mediaType) {
         "[MSM21] no title match for '" + details.title + "'" +
         (sample ? " candidates=" + sample : "")
       );
-      return null;
+      return Promise.resolve(null);
     }
 
-    console.log(
-      "[MSM21] matched title='" + ranked[0].item.rawTitle +
-      "' url=" + ranked[0].item.url
-    );
+    var query = queries[index++];
+    return searchSite(base, query).then(function (items) {
+      items.forEach(function (item) {
+        if (!seen[item.url]) seen[item.url] = item;
+      });
 
-    return ranked[0].item;
+      var ranked = items.map(function (item) {
+        return { item: item, score: scoreCandidate(item, details, mediaType) };
+      }).filter(function (x) {
+        return typeof x.score === "number";
+      }).sort(function (a, b) {
+        return b.score - a.score;
+      });
+
+      if (ranked.length) {
+        console.log(
+          "[MSM21] matched title='" + ranked[0].item.rawTitle +
+          "' url=" + ranked[0].item.url
+        );
+        return ranked[0].item;
+      }
+
+      return next();
+    }).catch(function (error) {
+      console.log("[MSM21] search failed query='" + query + "' error=" + error.message);
+      return next();
+    });
+  }
+
+  return next();
+}
+
+function findTitleFast(base, details, mediaType) {
+  return tryDirectTitlePage(base, details, mediaType).then(function (direct) {
+    if (direct) return direct;
+    return findBestTitle(base, details, mediaType);
   });
 }
 
@@ -361,13 +451,17 @@ function findEpisodeUrl(html, pageUrl, season, episode) {
 }
 
 function loadPlaybackPage(base, item, mediaType, season, episode) {
-  return fetchText(item.url, {
-    headers: {
-      "Accept": "text/html,*/*",
-      "Referer": base + "/",
-      "User-Agent": USER_AGENT
-    }
-  }).then(function (html) {
+  var pagePromise = item && item.html
+    ? Promise.resolve(item.html)
+    : fetchText(item.url, {
+        headers: {
+          "Accept": "text/html,*/*",
+          "Referer": base + "/",
+          "User-Agent": USER_AGENT
+        }
+      });
+
+  return pagePromise.then(function (html) {
     if (mediaType === "movie") {
       return {
         url: item.url,
@@ -537,16 +631,54 @@ function fetchOptionMirrors(base, pageUrl, option) {
   });
 }
 
+function playerOptionPriority(option) {
+  var value = String(option && option.label || "").toLowerCase();
+  if (/fire|wish|hgl/.test(value)) return 0;
+  if (/playm/.test(value)) return 1;
+  if (/byse/.test(value)) return 2;
+  if (/voe/.test(value)) return 3;
+  if (/mix/.test(value)) return 4;
+  if (/dsv|dood/.test(value)) return 5;
+  if (/abyss/.test(value)) return 6;
+  if (/veev/.test(value)) return 7;
+  if (/player|playe|ezpla|rpm|seek|p2p|upns/.test(value)) return 20;
+  return 10;
+}
+
+function mirrorPriority(mirror) {
+  var value = (String(mirror && mirror.label || "") + " " +
+    String(mirror && mirror.url || "")).toLowerCase();
+  if (/streamwish|hglink|wish|fire/.test(value)) return 0;
+  if (/playm/.test(value)) return 1;
+  if (/byse/.test(value)) return 2;
+  if (/voe/.test(value)) return 3;
+  if (/mixdrop|mixdr/.test(value)) return 4;
+  if (/dsvplay|dood/.test(value)) return 5;
+  if (/abyss|playhydrax/.test(value)) return 6;
+  if (/playerx|p2pstream|upns|ezpla|rpmpl|seekp/.test(value)) return 20;
+  return 10;
+}
+
 function collectMirrors(base, playback) {
   var options = extractPlayerOptions(playback.html);
 
   if (!options.length) {
     var staticMirrors = collectStaticMirrors(playback.html, playback.url);
     console.log("[MSM21] static mirrors=" + staticMirrors.length);
-    return Promise.resolve(staticMirrors);
+    console.log(
+      "[MSM21] mirror hosts=" +
+      staticMirrors.map(function (x) {
+        return hostOf(x.url) + "[" + String(x.label || "") + "]";
+      }).join(" | ")
+    );
+    return Promise.resolve(staticMirrors.sort(function (a, b) {
+      return mirrorPriority(a) - mirrorPriority(b);
+    }));
   }
 
-  var selected = options.slice(0, 8);
+  var selected = options.slice().sort(function (a, b) {
+    return playerOptionPriority(a) - playerOptionPriority(b);
+  }).slice(0, 6);
 
   return Promise.all(selected.map(function (option) {
     return fetchOptionMirrors(base, playback.url, option);
@@ -561,24 +693,304 @@ function collectMirrors(base, playback) {
 
     var mirrors = Object.keys(map).map(function (key) { return map[key]; });
     console.log("[MSM21] mirrors=" + mirrors.length);
-    return mirrors;
+    console.log(
+      "[MSM21] mirror hosts=" +
+      mirrors.map(function (x) {
+        return hostOf(x.url) + "[" + String(x.label || "") + "]";
+      }).join(" | ")
+    );
+    mirrors.forEach(function (x) {
+      console.log("[MSM21] mirror " + String(x.label || "") + " -> " + x.url);
+    });
+    return mirrors.sort(function (a, b) {
+      return mirrorPriority(a) - mirrorPriority(b);
+    });
+  });
+}
+
+
+function isLikelyStreamUrl(raw) {
+  var value = String(raw || "").toLowerCase();
+  if (!/^https?:\/\//i.test(String(raw || ""))) return false;
+
+  return /\.(?:m3u8|mp4|m4v|mkv|webm)(?:[?#]|$)/i.test(value) ||
+    value.indexOf("/sora/") >= 0 ||
+    value.indexOf("manifest.m3u8") >= 0 ||
+    value.indexOf("master.m3u8") >= 0 ||
+    /[?&](?:mime|type)=video/i.test(value);
+}
+
+function decodeHtmlEntities(value) {
+  return String(value || "")
+    .replace(/&amp;/g, "&")
+    .replace(/&#038;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'");
+}
+
+function hostOf(url) {
+  var m = String(url || "").match(/^https?:\/\/([^\/?#]+)/i);
+  return m ? m[1].toLowerCase() : "";
+}
+
+function unpackPacker(source) {
+  var text = String(source || "");
+  var marker = "eval(function(p,a,c,k,e,d)";
+  if (text.indexOf(marker) === -1) return text;
+
+  var re = /eval\(function\(p,a,c,k,e,d\)\{.*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/;
+  var match = re.exec(text);
+  if (!match) return text;
+
+  var payload = match[1]
+    .replace(/\\'/g, "'")
+    .replace(/\\\\/g, "\\");
+  var radix = Number(match[2]);
+  var count = Number(match[3]);
+  var symtab = match[4].split("|");
+
+  function encodeBase(num, base) {
+    var chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    if (num < base) return chars.charAt(num);
+    return encodeBase(Math.floor(num / base), base) + chars.charAt(num % base);
+  }
+
+  for (var i = count - 1; i >= 0; i--) {
+    if (!symtab[i]) continue;
+    var word = encodeBase(i, radix);
+    payload = payload.replace(
+      new RegExp("\\b" + word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b", "g"),
+      symtab[i]
+    );
+  }
+
+  return payload;
+}
+
+function resolveMixDrop(url, referer) {
+  if (!/(?:mixdrop|mxdrop|mdy48tn97)/i.test(url)) {
+    return Promise.resolve([]);
+  }
+
+  var embedUrl = String(url).replace("/f/", "/e/");
+
+  return fetchText(embedUrl, {
+    headers: {
+      "Accept": "text/html,*/*",
+      "Referer": referer || embedUrl,
+      "User-Agent": USER_AGENT
+    }
+  }).then(function (html) {
+    var unpacked = unpackPacker(html);
+    var match = unpacked.match(/wurl.*?=.*?["']([^"']+)["'];?/i);
+    if (!match) return [];
+
+    var streamUrl = String(match[1] || "");
+    if (/^\/\//.test(streamUrl)) streamUrl = "https:" + streamUrl;
+    if (!/^https?:\/\//i.test(streamUrl)) return [];
+
+    return [{
+      url: streamUrl,
+      referer: embedUrl,
+      label: "MixDrop"
+    }];
+  }).catch(function () {
+    return [];
+  });
+}
+
+function resolveStreamWish(url, referer) {
+  if (!/(?:streamwish|hglink|wish|filelions|filelion|rapidplayers|dwish|embedwish|flaswish|cdnwish|hlswish)/i.test(url)) {
+    return Promise.resolve([]);
+  }
+
+  return fetchText(url, {
+    headers: {
+      "Accept": "text/html,*/*",
+      "Referer": referer || url,
+      "User-Agent": USER_AGENT
+    }
+  }).then(function (html) {
+    var unpacked = unpackPacker(html);
+    var candidates = mediaUrlsFromText(unpacked, url);
+
+    if (!candidates.length) {
+      var matches = unpacked.match(/https?:\/\/[^\s"'<>\\]+/ig) || [];
+      candidates = matches.filter(isLikelyStreamUrl);
+    }
+
+    return candidates.map(function (streamUrl) {
+      return {
+        url: streamUrl,
+        referer: url,
+        label: "StreamWish"
+      };
+    });
+  }).catch(function () {
+    return [];
+  });
+}
+
+function rot13(value) {
+  return String(value || "").replace(/[a-zA-Z]/g, function (c) {
+    var code = c.charCodeAt(0);
+    var base = code <= 90 ? 65 : 97;
+    return String.fromCharCode(((code - base + 13) % 26) + base);
+  });
+}
+
+function base64DecodeBinary(input) {
+  var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  var clean = String(input || "").replace(/[^A-Za-z0-9+/=]/g, "");
+  var output = "";
+  var i = 0;
+
+  while (i < clean.length) {
+    var e1 = chars.indexOf(clean.charAt(i++));
+    var e2 = chars.indexOf(clean.charAt(i++));
+    var c3 = clean.charAt(i++);
+    var c4 = clean.charAt(i++);
+    var e3 = c3 === "=" ? 64 : chars.indexOf(c3);
+    var e4 = c4 === "=" ? 64 : chars.indexOf(c4);
+
+    if (e1 < 0 || e2 < 0) break;
+
+    var b1 = (e1 << 2) | (e2 >> 4);
+    output += String.fromCharCode(b1);
+
+    if (e3 !== 64 && e3 >= 0) {
+      var b2 = ((e2 & 15) << 4) | (e3 >> 2);
+      output += String.fromCharCode(b2);
+    }
+
+    if (e4 !== 64 && e4 >= 0 && e3 >= 0) {
+      var b3 = ((e3 & 3) << 6) | e4;
+      output += String.fromCharCode(b3);
+    }
+  }
+
+  return output;
+}
+
+function binaryToUtf8(binary) {
+  try {
+    var encoded = "";
+    for (var i = 0; i < binary.length; i++) {
+      encoded += "%" + ("0" + binary.charCodeAt(i).toString(16)).slice(-2);
+    }
+    return decodeURIComponent(encoded);
+  } catch (_) {
+    return binary;
+  }
+}
+
+function decryptVoe(encoded) {
+  try {
+    var step1 = rot13(encoded);
+    var patterns = ["@$", "^^", "~@", "%?", "*~", "!!", "#&"];
+
+    patterns.forEach(function (pattern) {
+      step1 = step1.split(pattern).join("_");
+    });
+
+    var step2 = step1.replace(/_/g, "");
+    var step3 = base64DecodeBinary(step2);
+    var step4 = "";
+
+    for (var i = 0; i < step3.length; i++) {
+      step4 += String.fromCharCode(step3.charCodeAt(i) - 3);
+    }
+
+    var step5 = step4.split("").reverse().join("");
+    var decoded = binaryToUtf8(base64DecodeBinary(step5));
+    return JSON.parse(decoded);
+  } catch (_) {
+    return null;
+  }
+}
+
+function resolveVoe(url, referer) {
+  if (!/(?:voe\.|voe\.sx|tubeless|simpulum|urochs|nathanfromsubject|yip\.su|metagnath|donaldlineelse|charlestoughrace)/i.test(url)) {
+    return Promise.resolve([]);
+  }
+
+  function load(target) {
+    return fetchResponse(target, {
+      headers: {
+        "Accept": "text/html,*/*",
+        "Referer": referer || target,
+        "User-Agent": USER_AGENT
+      }
+    });
+  }
+
+  return load(url).then(function (response) {
+    var redirect = response.text.match(/window\.location\.href\s*=\s*'([^']+)'/i);
+
+    if (redirect) {
+      return load(absoluteUrl(response.url || url, redirect[1]));
+    }
+
+    return response;
+  }).then(function (response) {
+    var cheerio = getCheerio();
+    var $ = cheerio.load(response.text);
+    var raw = $("script[type='application/json']").first().text().trim();
+
+    if (!raw) return [];
+
+    var encoded = raw;
+    try {
+      var parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length) encoded = String(parsed[0] || "");
+    } catch (_) {
+      encoded = raw.replace(/^\s*\[\s*"/, "").replace(/"\s*\]\s*$/, "");
+    }
+
+    var data = decryptVoe(encoded);
+    if (!data) return [];
+
+    var out = [];
+
+    if (data.source && isLikelyStreamUrl(data.source)) {
+      out.push({
+        url: data.source,
+        referer: response.url || url,
+        label: "VOE"
+      });
+    }
+
+    if (data.direct_access_url && isLikelyStreamUrl(data.direct_access_url)) {
+      out.push({
+        url: data.direct_access_url,
+        referer: response.url || url,
+        label: "VOE MP4"
+      });
+    }
+
+    return out;
+  }).catch(function () {
+    return [];
   });
 }
 
 function mediaUrlsFromText(text, baseUrl) {
-  var input = String(text || "")
+  var input = decodeHtmlEntities(String(text || ""))
     .replace(/\\u0026/gi, "&")
-    .replace(/\\\//g, "/")
-    .replace(/&amp;/g, "&");
+    .replace(/\\\//g, "/");
 
   var found = {};
 
   function add(raw) {
-    raw = String(raw || "").replace(/["'\\]+$/g, "");
+    raw = String(raw || "")
+      .trim()
+      .replace(/^["']|["']$/g, "")
+      .replace(/["'\\]+$/g, "");
+
     var url = absoluteUrl(baseUrl, raw);
     if (!url) return;
 
-    if (/\.(?:m3u8|mp4|mkv|webm)(?:[?#]|$)/i.test(url)) {
+    if (isLikelyStreamUrl(url)) {
       found[url] = true;
     }
   }
@@ -586,10 +998,8 @@ function mediaUrlsFromText(text, baseUrl) {
   var absolute = input.match(/https?:\/\/[^\s"'<>\\]+/ig) || [];
   absolute.forEach(add);
 
-  var quoted = input.match(/["']([^"']+\.(?:m3u8|mp4|mkv|webm)(?:\?[^"']*)?)["']/ig) || [];
-  quoted.forEach(function (value) {
-    add(value.slice(1, -1));
-  });
+  var protocolRelative = input.match(/\/\/[a-z0-9.-]+\/[^\s"'<>\\]+/ig) || [];
+  protocolRelative.forEach(add);
 
   return Object.keys(found);
 }
@@ -677,10 +1087,16 @@ function resolveDood(url, referer) {
 }
 
 function collectMediaFromObject(value, baseUrl, out, depth) {
-  if (depth > 5 || value == null) return;
+  if (depth > 7 || value == null) return;
 
   if (typeof value === "string") {
-    mediaUrlsFromText(value, baseUrl).forEach(function (url) {
+    var clean = decodeHtmlEntities(value).replace(/\\\//g, "/").trim();
+
+    if (/^https?:\/\//i.test(clean) && isLikelyStreamUrl(clean)) {
+      out[clean] = true;
+    }
+
+    mediaUrlsFromText(clean, baseUrl).forEach(function (url) {
       out[url] = true;
     });
     return;
@@ -695,7 +1111,19 @@ function collectMediaFromObject(value, baseUrl, out, depth) {
 
   if (typeof value === "object") {
     Object.keys(value).forEach(function (key) {
-      collectMediaFromObject(value[key], baseUrl, out, depth + 1);
+      var child = value[key];
+
+      if (
+        typeof child === "string" &&
+        /^(?:file|url|src|source|stream|playlist|hls|video)$/i.test(key)
+      ) {
+        var candidate = decodeHtmlEntities(child).replace(/\\\//g, "/").trim();
+        if (/^https?:\/\//i.test(candidate) && isLikelyStreamUrl(candidate)) {
+          out[candidate] = true;
+        }
+      }
+
+      collectMediaFromObject(child, baseUrl, out, depth + 1);
     });
   }
 }
@@ -713,8 +1141,14 @@ function resolveAbyss(url) {
       "User-Agent": USER_AGENT
     }
   }).then(function (html) {
-    var m = html.match(/const\s+datas\s*=\s*"([^"]+)"/i);
-    if (!m) return [];
+    var match =
+      html.match(/const\s+datas\s*=\s*"([^"]+)"/i) ||
+      html.match(/datas\s*[:=]\s*'([^']+)'/i);
+
+    if (!match) {
+      console.log("[MSM21] Abyss datas not found host=" + hostOf(url));
+      return [];
+    }
 
     return fetchJson("https://enc-dec.app/api/dec-abyss", {
       method: "POST",
@@ -723,28 +1157,42 @@ function resolveAbyss(url) {
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT
       },
-      body: JSON.stringify({ text: m[1] })
+      body: JSON.stringify({ text: match[1] })
     }).then(function (data) {
-      if (!data || Number(data.status) !== 200) return [];
+      if (!data || Number(data.status) !== 200) {
+        console.log("[MSM21] Abyss decrypt failed");
+        return [];
+      }
 
       var found = {};
       collectMediaFromObject(data.result, url, found, 0);
 
-      return Object.keys(found).map(function (streamUrl) {
+      var urls = Object.keys(found);
+      console.log("[MSM21] Abyss streams=" + urls.length);
+
+      return urls.map(function (streamUrl) {
         return {
           url: streamUrl,
-          referer: originOf(url) + "/",
+          referer: url,
           label: "Abyss"
         };
       });
     });
-  }).catch(function () {
+  }).catch(function (error) {
+    console.log(
+      "[MSM21] Abyss resolver error=" +
+      (error && error.message ? error.message : String(error))
+    );
     return [];
   });
 }
 
 function resolveGeneric(url, referer, depth) {
-  if (/\.(?:m3u8|mp4|mkv|webm)(?:[?#]|$)/i.test(url)) {
+  if (/(?:playerx\.|p2pstream\.|upns\.live|ezpla|rpmpl|seekp)/i.test(url)) {
+    console.log("[MSM21] JS-only mirror skipped host=" + hostOf(url));
+    return Promise.resolve([]);
+  }
+  if (isLikelyStreamUrl(url)) {
     return Promise.resolve([{
       url: url,
       referer: referer || originOf(url) + "/",
@@ -796,21 +1244,47 @@ function resolveMirror(mirror, pageUrl, depth) {
   var url = String(mirror && mirror.url || "");
   if (!url) return Promise.resolve([]);
 
-  return resolveAbyss(url).then(function (streams) {
-    if (streams.length) return streams;
+  var host = hostOf(url);
 
-    return resolveDood(url, pageUrl).then(function (doodStreams) {
-      if (doodStreams.length) return doodStreams;
-      return resolveGeneric(url, pageUrl, depth || 0);
-    });
-  }).then(function (streams) {
-    return streams.map(function (stream) {
+  function finish(streams) {
+    return (streams || []).map(function (stream) {
       if (!stream.label || stream.label === "Direct" || stream.label === "Nested") {
-        stream.label = mirror.label || stream.label || "MSM21";
+        stream.label = mirror.label || stream.label || host || "MSM21";
       }
       return stream;
     });
-  });
+  }
+
+  return resolveAbyss(url)
+    .then(function (streams) {
+      if (streams.length) return streams;
+      return resolveDood(url, pageUrl);
+    })
+    .then(function (streams) {
+      if (streams.length) return streams;
+      return resolveMixDrop(url, pageUrl);
+    })
+    .then(function (streams) {
+      if (streams.length) return streams;
+      return resolveStreamWish(url, pageUrl);
+    })
+    .then(function (streams) {
+      if (streams.length) return streams;
+      return resolveVoe(url, pageUrl);
+    })
+    .then(function (streams) {
+      if (streams.length) return streams;
+      return resolveGeneric(url, pageUrl, depth || 0);
+    })
+    .then(function (streams) {
+      if (!streams.length) {
+        console.log(
+          "[MSM21] unresolved host=" + (host || "?") +
+          " label='" + String(mirror.label || "") + "'"
+        );
+      }
+      return finish(streams);
+    });
 }
 
 function qualityFromUrl(url) {
@@ -867,7 +1341,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       return getTmdbDetails(tmdbId, mediaType);
     })
     .then(function (details) {
-      return findBestTitle(base, details, mediaType);
+      return findTitleFast(base, details, mediaType);
     })
     .then(function (item) {
       if (!item) return null;
@@ -876,7 +1350,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     .then(function (playback) {
       if (!playback) return [];
       return collectMirrors(base, playback).then(function (mirrors) {
-        return Promise.all(mirrors.slice(0, 8).map(function (mirror) {
+        return Promise.all(mirrors.slice(0, 6).map(function (mirror) {
           return resolveMirror(mirror, playback.url, 0).catch(function () {
             return [];
           });
@@ -892,7 +1366,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       });
 
       var streams = formatStreams(flat);
-      console.log("[MSM21] v1.0.0 playable sources=" + streams.length);
+      console.log("[MSM21] v1.0.2 playable sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

@@ -1,5 +1,32 @@
 {
   "name": "Luckez12 Plugins",
   "version": "1.0",
-  "scrapers": []
+  "scrapers": [
+    {
+      "id": "kisskh",
+      "name": "KissKH",
+      "description": "KissKH Asian dramas and movies",
+      "version": "1.0.1",
+      "author": "Luckez12",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/kisskh.js",
+      "enabled": true,
+      "hasSettings": false,
+      "formats": [
+        "m3u8",
+        "mp4"
+      ],
+      "logo": "https://www.google.com/s2/favicons?domain=kisskh.do&sz=128",
+      "contentLanguage": [
+        "ko",
+        "zh",
+        "ja",
+        "th",
+        "en"
+      ]
+    }
+  ]
 }

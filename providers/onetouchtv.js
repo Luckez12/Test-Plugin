@@ -206,6 +206,29 @@ function normalizeTitle(value) {
     .trim();
 }
 
+function stripTrailingYear(value) {
+  return normalizeTitle(value)
+    .replace(/\s+(?:19|20)\d{2}$/, "")
+    .trim();
+}
+
+function seasonTitleVariants(title, season) {
+  var s = Number(season || 1);
+  var base = String(title || "").trim();
+  if (!base || s <= 1) return [];
+
+  return [
+    base + " Season " + s,
+    base + " Season" + s,
+    base + " S" + String(s).padStart(2, "0"),
+    base + " S" + s,
+    base + " " + s,
+    base + " " + s + "nd Season",
+    base + " " + s + "rd Season",
+    base + " " + s + "th Season"
+  ];
+}
+
 function inferQuality(value) {
   var match = String(value || "").match(/(?:^|[^0-9])(2160|1440|1080|720|480|360)(?:p|[^0-9]|$)/i);
   return match ? match[1] + "p" : "Auto";
@@ -251,6 +274,7 @@ function fetchTmdbDetails(tmdbId, mediaType) {
 
 function buildQueries(details, mediaType, season) {
   var queries = [];
+
   function add(value) {
     value = String(value || "").trim();
     if (value && queries.indexOf(value) === -1) queries.push(value);
@@ -262,15 +286,12 @@ function buildQueries(details, mediaType, season) {
 
   if (mediaType === "tv" && Number(season || 1) > 1) {
     titles.slice(0, 4).forEach(function (title) {
-      add(title + " Season " + Number(season));
-      add(title + " S" + String(Number(season)).padStart(2, "0"));
-      add(title + " " + Number(season));
-      add(title + " " + Number(season));
+      seasonTitleVariants(title, season).forEach(add);
     });
   }
 
   titles.forEach(add);
-  return queries.slice(0, 8);
+  return queries.slice(0, 12);
 }
 
 function parseSearchPayload(payload) {
@@ -308,6 +329,7 @@ function collectCandidates(queries) {
 
 function targetTitles(details, mediaType, season) {
   var set = {};
+
   function add(value) {
     var n = normalizeTitle(value);
     if (n) set[n] = true;
@@ -321,14 +343,19 @@ function targetTitles(details, mediaType, season) {
 
   if (mediaType === "tv" && Number(season || 1) > 1) {
     titles.forEach(function (title) {
-      add(title + " Season " + Number(season));
-      add(title + " S" + String(Number(season)).padStart(2, "0"));
-      add(title + " " + Number(season));
-      add(title + " " + Number(season));
+      seasonTitleVariants(title, season).forEach(add);
     });
   }
 
   return set;
+}
+
+function titleMatchesTargets(value, targets) {
+  var exact = normalizeTitle(value);
+  if (exact && targets[exact]) return true;
+
+  var withoutYear = stripTrailingYear(value);
+  return !!(withoutYear && targets[withoutYear]);
 }
 
 function itemTitleSet(item) {
@@ -355,22 +382,49 @@ function candidateScore(item, details, mediaType, season) {
   if (!item || !mediaTypeCompatible(item.type, mediaType)) return null;
 
   var targets = targetTitles(details, mediaType, season);
-  var titles = itemTitleSet(item);
-  var matched = Object.keys(titles).some(function (title) { return !!targets[title]; });
+  var values = [item.title]
+    .concat(Array.isArray(item.otherTitles) ? item.otherTitles : [])
+    .filter(Boolean);
+
+  var matched = values.some(function (value) {
+    return titleMatchesTargets(value, targets);
+  });
+
   if (!matched) return null;
 
   var targetYear = Number(String(details.year || "").slice(0, 4));
   var itemYear = Number(String(item.year || "").slice(0, 4));
-  if (targetYear && itemYear && Math.abs(targetYear - itemYear) > 1) return null;
+  var seasonNumber = Number(season || 1);
+
+  // TMDB TV year is the show's first-air year. Do not reject later seasons
+  // because their upstream item can use the season's actual release year.
+  if (
+    (mediaType === "movie" || seasonNumber <= 1) &&
+    targetYear &&
+    itemYear &&
+    Math.abs(targetYear - itemYear) > 1
+  ) {
+    return null;
+  }
 
   var score = 100;
-  if (targetYear && itemYear) score += targetYear === itemYear ? 50 : 20;
-  if (normalizeTitle(item.title) === normalizeTitle(details.title)) score += 30;
-  if (normalizeTitle(item.title) === normalizeTitle(details.originalTitle)) score += 20;
+  var normalizedMain = stripTrailingYear(item.title);
 
-  if (mediaType === "tv" && Number(season || 1) > 1) {
-    var seasonTitle = normalizeTitle(details.title + " Season " + Number(season));
-    if (titles[seasonTitle]) score += 40;
+  if (normalizedMain === normalizeTitle(details.title)) score += 30;
+  if (normalizedMain === normalizeTitle(details.originalTitle)) score += 20;
+
+  if (mediaType === "tv" && seasonNumber > 1) {
+    var seasonVariants = seasonTitleVariants(details.title, seasonNumber)
+      .map(normalizeTitle);
+
+    if (seasonVariants.indexOf(normalizedMain) !== -1) {
+      score += 100;
+    }
+
+    // Prefer a later-year entry for later seasons, but never require it.
+    if (targetYear && itemYear && itemYear > targetYear) score += 20;
+  } else if (targetYear && itemYear) {
+    score += targetYear === itemYear ? 50 : 20;
   }
 
   return score;
@@ -385,20 +439,47 @@ function detailScore(detail, item, details, mediaType, season) {
   if (baseScore === null || !detail) return null;
   if (!mediaTypeCompatible(detail.type, mediaType)) return null;
 
-  var detailTitle = normalizeTitle(detail.title);
   var targets = targetTitles(details, mediaType, season);
-  if (detailTitle && !targets[detailTitle]) {
+  var detailTitle = String(detail.title || "");
+
+  if (detailTitle && !titleMatchesTargets(detailTitle, targets)) {
     var itemTitles = itemTitleSet(item);
-    if (!itemTitles[detailTitle]) return null;
+    var normalizedDetail = normalizeTitle(detailTitle);
+    var strippedDetail = stripTrailingYear(detailTitle);
+
+    if (!itemTitles[normalizedDetail] && !itemTitles[strippedDetail]) {
+      return null;
+    }
   }
 
   var targetYear = Number(String(details.year || "").slice(0, 4));
   var resultYear = Number(String(detail.year || "").slice(0, 4));
-  if (targetYear && resultYear && Math.abs(targetYear - resultYear) > 1) return null;
+  var seasonNumber = Number(season || 1);
+
+  if (
+    (mediaType === "movie" || seasonNumber <= 1) &&
+    targetYear &&
+    resultYear &&
+    Math.abs(targetYear - resultYear) > 1
+  ) {
+    return null;
+  }
 
   var score = baseScore;
-  if (detailTitle === normalizeTitle(details.title)) score += 30;
-  if (targetYear && resultYear) score += targetYear === resultYear ? 40 : 15;
+  var strippedTitle = stripTrailingYear(detailTitle);
+
+  if (strippedTitle === normalizeTitle(details.title)) score += 30;
+
+  if (mediaType === "tv" && seasonNumber > 1) {
+    var seasonVariants = seasonTitleVariants(details.title, seasonNumber)
+      .map(normalizeTitle);
+
+    if (seasonVariants.indexOf(strippedTitle) !== -1) score += 100;
+    if (targetYear && resultYear && resultYear > targetYear) score += 20;
+  } else if (targetYear && resultYear) {
+    score += targetYear === resultYear ? 40 : 15;
+  }
+
   return score;
 }
 
@@ -411,7 +492,19 @@ function chooseBest(candidates, details, mediaType, season) {
     return b.score - a.score;
   }).slice(0, 8);
 
-  if (!ranked.length) return Promise.resolve(null);
+  if (!ranked.length) {
+    var sample = (candidates || []).slice(0, 10).map(function (item) {
+      return String(item && item.title || "?") +
+        (item && item.year ? " (" + item.year + ")" : "") +
+        (item && item.type ? " [" + item.type + "]" : "");
+    }).join(" | ");
+
+    console.log(
+      "[OneTouchTV] no ranked match" +
+      (sample ? " candidates=" + sample : "")
+    );
+    return Promise.resolve(null);
+  }
 
   return Promise.all(ranked.map(function (entry) {
     return fetchDetail(entry.item.id).then(function (detail) {
@@ -525,7 +618,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (payload) {
       var streams = parseStreams(payload);
-      console.log("[OneTouchTV] v1.0.2 playable sources=" + streams.length);
+      console.log("[OneTouchTV] v1.0.3 playable sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

@@ -6,6 +6,7 @@ const BASE_CANDIDATES = [
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 const USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
+const PLAYMATE_USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64; rv:153.0) Gecko/20100101 Firefox/153.0";
 
 var resolvedBasePromise = null;
 
@@ -659,6 +660,81 @@ function mirrorPriority(mirror) {
   return 10;
 }
 
+function isFastMirror(mirror) {
+  var value = (String(mirror && mirror.label || "") + " " +
+    String(mirror && mirror.url || "")).toLowerCase();
+
+  return isLikelyStreamUrl(String(mirror && mirror.url || "")) ||
+    /playmate|playm|streamwish|hglink|wish|fire|voe|mixdrop|mixdr|dsvplay|dood/.test(value);
+}
+
+function resolveMirrorsFastFirst(mirrors, pageUrl) {
+  var limited = (mirrors || []).slice(0, 6);
+
+  var playmate = limited.filter(function (mirror) {
+    return /playmate\.to|playmate|playm/i.test(
+      String(mirror && mirror.url || "") + " " + String(mirror && mirror.label || "")
+    );
+  });
+
+  var reliable = limited.filter(function (mirror) {
+    var value = (String(mirror && mirror.url || "") + " " +
+      String(mirror && mirror.label || "")).toLowerCase();
+    return playmate.indexOf(mirror) === -1 &&
+      /dsvplay|dood|streamwish|hglink|wish|fire|voe/.test(value);
+  });
+
+  var fallback = limited.filter(function (mirror) {
+    return playmate.indexOf(mirror) === -1 && reliable.indexOf(mirror) === -1;
+  });
+
+  function resolveGroup(group) {
+    return Promise.all(group.map(function (mirror) {
+      return resolveMirror(mirror, pageUrl, 0).catch(function () {
+        return [];
+      });
+    }));
+  }
+
+  function streamCount(groups) {
+    var count = 0;
+    (groups || []).forEach(function (group) {
+      count += Array.isArray(group) ? group.length : 0;
+    });
+    return count;
+  }
+
+  function tryReliable() {
+    if (!reliable.length) return tryFallback();
+    return resolveGroup(reliable).then(function (groups) {
+      var count = streamCount(groups);
+      if (count > 0) {
+        console.log("[MSM21] reliable streams=" + count + " fallback mirrors skipped=" + fallback.length);
+        return groups;
+      }
+      return tryFallback();
+    });
+  }
+
+  function tryFallback() {
+    if (!fallback.length) return Promise.resolve([]);
+    console.log("[MSM21] reliable path empty, trying fallback mirrors=" + fallback.length);
+    return resolveGroup(fallback);
+  }
+
+  if (!playmate.length) return tryReliable();
+
+  console.log("[MSM21] Playmate priority host=" + hostOf(playmate[0].url));
+  return resolveGroup(playmate).then(function (groups) {
+    var count = streamCount(groups);
+    if (count > 0) {
+      console.log("[MSM21] Playmate streams=" + count + " other mirrors skipped=" + (reliable.length + fallback.length));
+      return groups;
+    }
+    return tryReliable();
+  });
+}
+
 function collectMirrors(base, playback) {
   var options = extractPlayerOptions(playback.html);
 
@@ -1044,44 +1120,94 @@ function randomToken(length) {
   return out;
 }
 
+function resolvePlaymate(url) {
+  if (!/playmate\.to/i.test(String(url || ""))) {
+    return Promise.resolve([]);
+  }
+
+  var cleanUrl = String(url || "").split("#")[0].split("?")[0].replace(/\/+$/, "");
+  var id = cleanUrl.substring(cleanUrl.lastIndexOf("/") + 1);
+  if (!id) return Promise.resolve([]);
+
+  return fetchJson("https://playmate.to/api/s", {
+    method: "POST",
+    headers: {
+      "Accept": "application/json,*/*",
+      "Content-Type": "application/json",
+      "User-Agent": PLAYMATE_USER_AGENT
+    },
+    body: JSON.stringify({ c: id, d: "web" })
+  }).then(function (data) {
+    var streamUrl = String(data && data.sx || "").trim();
+    if (!/^https?:\/\//i.test(streamUrl)) return [];
+
+    console.log("[MSM21] Playmate direct=" + hostOf(streamUrl));
+    return [{
+      url: streamUrl,
+      label: "Playmate",
+      noReferer: true,
+      headers: {
+        "Accept": "*/*",
+        "User-Agent": PLAYMATE_USER_AGENT
+      }
+    }];
+  }).catch(function (error) {
+    console.log("[MSM21] Playmate resolver error=" + (error && error.message ? error.message : String(error)));
+    return [];
+  });
+}
+
 function resolveDood(url, referer) {
   if (!/(?:dood|dsvplay|ds2play|vide0\.net|myvidplay)/i.test(url)) {
     return Promise.resolve([]);
   }
 
-  return fetchText(url, {
+  var embedUrl = String(url).replace("/d/", "/e/");
+
+  return fetchResponse(embedUrl, {
     headers: {
       "Accept": "text/html,*/*",
-      "Referer": referer || url,
+      "Referer": referer || originOf(embedUrl) + "/",
       "User-Agent": USER_AGENT
     }
-  }).then(function (html) {
-    var passMatch = html.match(/['"](\/pass_md5[^'"]+)['"]/i);
-    var tokenMatch = html.match(/[?&]token=([a-z0-9]+)[&'"]/i);
+  }).then(function (response) {
+    var html = response.text;
+    var finalEmbedUrl = response.url || embedUrl;
+    var host = originOf(finalEmbedUrl);
+    var passMatch = html.match(/\/pass_md5\/[^'"\s<]+/i);
+    if (!passMatch) return [];
 
-    if (!passMatch || !tokenMatch) return [];
+    var passPath = passMatch[0];
+    var passUrl = /^https?:\/\//i.test(passPath) ? passPath : host + passPath;
+    var token = passUrl.substring(passUrl.lastIndexOf("/") + 1);
+    if (!token) return [];
 
-    var passUrl = absoluteUrl(url, passMatch[1]);
     return fetchText(passUrl, {
       headers: {
         "Accept": "*/*",
-        "Referer": url,
+        "Referer": finalEmbedUrl,
         "User-Agent": USER_AGENT
       }
     }).then(function (prefix) {
-      var finalUrl =
-        String(prefix || "").trim() +
-        randomToken(10) +
-        "?token=" + tokenMatch[1] +
-        "&expiry=" + Date.now();
+      var base = String(prefix || "").trim();
+      if (!/^https?:\/\//i.test(base)) return [];
+
+      var finalUrl = base + randomToken(10) + "?token=" + encodeURIComponent(token);
+      console.log("[MSM21] Dood direct=" + hostOf(finalUrl));
 
       return [{
         url: finalUrl,
-        referer: url,
-        label: "Dood"
+        referer: host + "/",
+        label: "Dood",
+        headers: {
+          "Accept": "*/*",
+          "Referer": host + "/",
+          "User-Agent": USER_AGENT
+        }
       }];
     });
-  }).catch(function () {
+  }).catch(function (error) {
+    console.log("[MSM21] Dood resolver error=" + (error && error.message ? error.message : String(error)));
     return [];
   });
 }
@@ -1255,10 +1381,14 @@ function resolveMirror(mirror, pageUrl, depth) {
     });
   }
 
-  return resolveAbyss(url)
+  return resolvePlaymate(url)
     .then(function (streams) {
       if (streams.length) return streams;
       return resolveDood(url, pageUrl);
+    })
+    .then(function (streams) {
+      if (streams.length) return streams;
+      return resolveAbyss(url);
     })
     .then(function (streams) {
       if (streams.length) return streams;
@@ -1306,16 +1436,29 @@ function formatStreams(streams) {
 
     var quality = qualityFromUrl(url);
     var label = String(stream.label || "MSM21").trim();
+    var headers = {};
+    var supplied = stream && stream.headers || {};
+
+    Object.keys(supplied).forEach(function (key) {
+      headers[key] = supplied[key];
+    });
+
+    if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
+    if (!headers["Accept"]) headers["Accept"] = "*/*";
+
+    if (!stream.noReferer) {
+      headers["Referer"] = stream.referer || headers["Referer"] || originOf(url) + "/";
+    } else {
+      delete headers["Referer"];
+      delete headers["referer"];
+    }
 
     out.push({
       name: PROVIDER,
       title: label + " • " + quality + " • MalaySub",
       url: url,
       quality: quality,
-      headers: {
-        "Referer": stream.referer || originOf(url) + "/",
-        "User-Agent": USER_AGENT
-      }
+      headers: headers
     });
   });
 
@@ -1350,11 +1493,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     .then(function (playback) {
       if (!playback) return [];
       return collectMirrors(base, playback).then(function (mirrors) {
-        return Promise.all(mirrors.slice(0, 6).map(function (mirror) {
-          return resolveMirror(mirror, playback.url, 0).catch(function () {
-            return [];
-          });
-        }));
+        return resolveMirrorsFastFirst(mirrors, playback.url);
       });
     })
     .then(function (groups) {
@@ -1366,7 +1505,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       });
 
       var streams = formatStreams(flat);
-      console.log("[MSM21] v1.0.2 playable sources=" + streams.length);
+      console.log("[MSM21] v1.0.4 playable sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -927,6 +927,79 @@ function resolveMirror(mirror, pageUrl, depth) {
     });
 }
 
+function probeDoodStream(stream) {
+  var url = String(stream && stream.url || "").trim();
+  if (!url) return Promise.resolve({ stream: stream, ok: false, status: 0, contentType: "" });
+
+  var headers = {};
+  var supplied = stream.headers || {};
+  Object.keys(supplied).forEach(function (key) { headers[key] = supplied[key]; });
+  if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
+  if (!headers["Accept"]) headers["Accept"] = "*/*";
+  if (!headers["Referer"] && !headers["referer"]) {
+    headers["Referer"] = stream.referer || "https://dsvplay.com/";
+  }
+  headers["Range"] = "bytes=0-1";
+
+  return fetch(url, {
+    method: "GET",
+    headers: headers
+  }).then(function (res) {
+    var status = res ? Number(res.status || 0) : 0;
+    var contentType = "";
+    try {
+      contentType = String(res && res.headers && res.headers.get ? (res.headers.get("content-type") || "") : "").toLowerCase();
+    } catch (_) {}
+
+    var okStatus = status === 200 || status === 206;
+    var looksLikeError = /text\/html|application\/json|text\/plain/.test(contentType);
+    var ok = okStatus && !looksLikeError;
+    console.log("[PencuriMovie] DSV probe status=" + status + " type='" + contentType + "' ok=" + ok);
+    return { stream: stream, ok: ok, status: status, contentType: contentType };
+  }).catch(function (error) {
+    console.log("[PencuriMovie] DSV probe failed=" + (error && error.message ? error.message : String(error)));
+    return { stream: stream, ok: false, status: 0, contentType: "" };
+  });
+}
+
+function filterDeadDoodStreams(streams) {
+  var list = streams || [];
+  var doodIndexes = [];
+
+  list.forEach(function (stream, index) {
+    var label = String(stream && stream.label || "").toLowerCase();
+    if (/dood|dsv/.test(label)) doodIndexes.push(index);
+  });
+
+  if (doodIndexes.length < 2) return Promise.resolve(list);
+
+  return Promise.all(doodIndexes.map(function (index) {
+    return probeDoodStream(list[index]).then(function (result) {
+      result.index = index;
+      return result;
+    });
+  })).then(function (results) {
+    var passing = {};
+    results.forEach(function (result) {
+      if (result.ok) passing[result.index] = true;
+    });
+
+    var passCount = Object.keys(passing).length;
+    if (!passCount) {
+      console.log("[PencuriMovie] DSV probe inconclusive, keeping original links");
+      return list;
+    }
+
+    var filtered = list.filter(function (stream, index) {
+      if (doodIndexes.indexOf(index) === -1) return true;
+      return !!passing[index];
+    });
+
+    console.log("[PencuriMovie] DSV verified=" + passCount + "/" + doodIndexes.length);
+    return filtered;
+  });
+}
+
 function qualityFromUrl(url) {
   var value = String(url || "").toLowerCase();
   var m = value.match(/(?:^|[^0-9])(2160|1440|1080|720|480|360)p?(?:[^0-9]|$)/);
@@ -1013,6 +1086,9 @@ function getStreams(tmdbId, mediaType, season, episode) {
       if (!playback) return [];
       var mirrors = collectEmbedUrls(playback.html, playback.url);
       return resolveMirrors(mirrors, playback.url);
+    })
+    .then(function (resolved) {
+      return filterDeadDoodStreams(resolved || []);
     })
     .then(function (resolved) {
       var streams = formatStreams(resolved || []);

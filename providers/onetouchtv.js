@@ -139,6 +139,44 @@ function decryptString(encrypted) {
   return JSON.stringify(wrapper.result);
 }
 
+function decryptViaRemote(raw) {
+  return fetch("https://enc-dec.app/api/dec-onetouchtv", {
+    method: "POST",
+    headers: {
+      "Accept": "application/json",
+      "Content-Type": "application/json",
+      "User-Agent": USER_AGENT
+    },
+    body: JSON.stringify({ text: String(raw || "") })
+  }).then(function (res) {
+    if (!res || !res.ok) {
+      throw new Error("remote decrypt HTTP " + (res ? res.status : "unknown"));
+    }
+    return res.text();
+  }).then(function (body) {
+    var envelope = parseJsonLenient(body, "remote decrypt response");
+
+    if (!envelope || Number(envelope.status) !== 200) {
+      throw new Error(
+        "remote decrypt failed" +
+        (envelope && envelope.error ? ": " + envelope.error : "")
+      );
+    }
+
+    var result = envelope.result;
+
+    if (typeof result === "string") {
+      return parseJsonLenient(result, "remote decrypted result");
+    }
+
+    if (result && typeof result === "object") {
+      return result;
+    }
+
+    throw new Error("remote decrypt returned empty result");
+  });
+}
+
 function getDecryptedJson(url) {
   return fetchText(url, {
     headers: {
@@ -147,7 +185,15 @@ function getDecryptedJson(url) {
       "User-Agent": USER_AGENT
     }
   }).then(function (raw) {
-    return parseJsonLenient(decryptString(raw), "decrypted result");
+    try {
+      return parseJsonLenient(decryptString(raw), "decrypted result");
+    } catch (localError) {
+      console.log(
+        "[OneTouchTV] local decrypt failed, trying remote fallback: " +
+        (localError && localError.message ? localError.message : String(localError))
+      );
+      return decryptViaRemote(raw);
+    }
   });
 }
 
@@ -479,7 +525,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (payload) {
       var streams = parseStreams(payload);
-      console.log("[OneTouchTV] v1.0.1 playable sources=" + streams.length);
+      console.log("[OneTouchTV] v1.0.2 playable sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

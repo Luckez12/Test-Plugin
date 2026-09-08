@@ -31,7 +31,7 @@
       "id": "onetouchtv",
       "name": "OneTouchTV",
       "description": "OneTouchTV movies and series provider",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

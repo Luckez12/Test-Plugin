@@ -107,7 +107,7 @@
       "id": "moviebox",
       "name": "MovieBox",
       "description": "MovieBox mobile API movies and TV provider",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

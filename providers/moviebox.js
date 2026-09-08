@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.0.1";
+const VERSION = "1.0.2";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 const CryptoJS = require("crypto-js");
@@ -350,6 +350,12 @@ function fetchResolution(subjectId, mediaType, season, episode, resolution) {
         return Number(item.se) === se && Number(item.ep) === ep;
       });
     }
+    list.forEach(function (item) {
+      // Some current MovieBox responses omit/zero the resolution field even
+      // though the endpoint itself was filtered by resolution.
+      item._requestedResolution = resolution;
+      if (!Number(item.resolution)) item.resolution = resolution;
+    });
     console.log("[MovieBox] resource " + resolution + "p host=" + (result ? result.host : "none") + " items=" + list.length);
     return list;
   }).catch(function (error) {
@@ -375,21 +381,64 @@ function loadStreams(item, mediaType, season, episode) {
   });
 }
 
+function candidateDuration(item) {
+  var n = Number(item && item.duration || 0);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
+function candidateSize(item) {
+  var raw = String(item && item.size || "").trim();
+  var n = parseInt(raw, 10);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
+function isNoticeCandidate(item) {
+  var text = String(item && item.title || "").toLowerCase();
+  return /install(?:ation)?|official\s*notice|update\s*(?:the\s*)?app|download\s*(?:the\s*)?(?:latest\s*)?(?:version|app)|uninstall/.test(text);
+}
+
+function candidateScore(item) {
+  var score = 0;
+  if (isNoticeCandidate(item)) score -= 1000000000000;
+  score += candidateDuration(item) * 1000000;
+  score += candidateSize(item);
+  return score;
+}
+
 function formatResults(items) {
+  var groups = {};
   var seenUrl = {};
-  var seenQuality = {};
-  var sorted = (items || []).slice().sort(function (a, b) {
-    return Number(b.resolution || 0) - Number(a.resolution || 0);
-  });
   var out = [];
 
-  sorted.forEach(function (item) {
+  (items || []).forEach(function (item) {
     var url = String(item.resourceLink || item.url || "").trim();
-    var resolution = Number(item.resolution || 0);
-    var quality = resolution ? resolution + "p" : "Auto";
-    if (!/^https?:\/\//i.test(url) || seenUrl[url] || seenQuality[quality]) return;
+    if (!/^https?:\/\//i.test(url) || seenUrl[url]) return;
     seenUrl[url] = true;
-    seenQuality[quality] = true;
+    var resolution = Number(item.resolution || item._requestedResolution || 0);
+    var key = resolution > 0 ? String(resolution) : "0";
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(item);
+  });
+
+  Object.keys(groups).sort(function (a, b) { return Number(b) - Number(a); }).forEach(function (key) {
+    var candidates = groups[key].slice().sort(function (a, b) {
+      return candidateScore(b) - candidateScore(a);
+    });
+    if (!candidates.length) return;
+
+    var item = candidates[0];
+    var url = String(item.resourceLink || item.url || "").trim();
+    var resolution = Number(item.resolution || item._requestedResolution || key || 0);
+    var quality = resolution ? resolution + "p" : "Auto";
+    var dur = candidateDuration(item);
+    var size = candidateSize(item);
+    var host = "unknown";
+    try { host = url.replace(/^https?:\/\//i, "").split("/")[0]; } catch (_) {}
+
+    console.log("[MovieBox] select " + quality + " candidates=" + candidates.length +
+      " duration=" + dur + " size=" + size + " linkType=" + String(item.linkType == null ? "?" : item.linkType) +
+      " host=" + host + (isNoticeCandidate(item) ? " notice=yes" : " notice=no"));
+
     out.push({
       name: PROVIDER,
       title: "MovieBox • " + quality + " • MP4",

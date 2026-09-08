@@ -52,6 +52,30 @@
         "th"
       ],
       "supportsExternalPlayer": true
+    },
+    {
+      "id": "msm21",
+      "name": "MSM21",
+      "description": "Malay subtitle movies and TV provider",
+      "version": "1.0.0",
+      "author": "Luckez12",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/msm21.js",
+      "enabled": true,
+      "hasSettings": false,
+      "formats": [
+        "m3u8",
+        "mp4",
+        "mkv",
+        "webm"
+      ],
+      "contentLanguage": [
+        "ms"
+      ],
+      "supportsExternalPlayer": true
     }
   ]
 }

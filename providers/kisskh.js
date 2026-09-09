@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.4";
+var VERSION = "1.0.5";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
@@ -258,141 +258,228 @@ function getDramaDetail(baseUrl, id) {
   });
 }
 
+
+function candidateYear(item) {
+  if (!item || typeof item !== "object") return "";
+  var direct = item.year || item.releaseYear || item.releaseDate || item.release_date || "";
+  var directYear = String(direct || "").match(/\b((?:19|20)\d{2})\b/);
+  if (directYear) return directYear[1];
+
+  var titleYear = String(item.title || "").match(/\b((?:19|20)\d{2})\b/);
+  return titleYear ? titleYear[1] : "";
+}
+
+function cleanCandidateTitle(value) {
+  return String(value || "")
+    .replace(/\s*[\(\[\{]\s*(?:19|20)\d{2}\s*[\)\]\}]\s*$/i, "")
+    .replace(/\s*[-–—]\s*(?:19|20)\d{2}\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function aliasList(info) {
+  return uniqueText([info.title, info.originalTitle].concat(info.aliases || []));
+}
+
+function candidateQuickScore(item, info, mediaType) {
+  var aliases = aliasList(info);
+  var title = cleanCandidateTitle(item && item.title);
+  var score = 0;
+
+  aliases.forEach(function(alias) {
+    score = Math.max(score, titleScore(title, alias));
+  });
+
+  var year = candidateYear(item);
+  if (info.year && year) {
+    var diff = Math.abs(Number(info.year) - Number(year));
+    if (diff === 0) score += 35;
+    else if (diff === 1) score += 5;
+    else score -= 90;
+  }
+
+  score += typePenalty(item, mediaType);
+  return score;
+}
+
+function verifyCandidateDetail(base, candidate, info, mediaType) {
+  return getDramaDetail(base, candidate.id)
+    .then(function(detail) {
+      var aliases = aliasList(info);
+      var score = 0;
+
+      aliases.forEach(function(alias) {
+        score = Math.max(
+          score,
+          titleScore(cleanCandidateTitle(detail && detail.title), alias)
+        );
+      });
+
+      var detailYear = candidateYear(detail) || candidateYear(candidate);
+      score += yearScore(detailYear, info.year);
+      score += typePenalty(detail, mediaType);
+      score += typePenalty(candidate, mediaType);
+
+      if (
+        mediaType === "movie" &&
+        detail &&
+        Array.isArray(detail.episodes) &&
+        detail.episodes.length === 1
+      ) {
+        score += 15;
+      }
+
+      if (
+        score < 75 ||
+        (
+          info.year &&
+          detailYear &&
+          Math.abs(Number(info.year) - Number(detailYear)) > 1
+        )
+      ) {
+        return null;
+      }
+
+      console.log(
+        "[KissKH] MATCH host=" + base +
+        " title='" + String(detail && detail.title || "") +
+        "' year=" + (detailYear || "?") +
+        " score=" + Math.round(score)
+      );
+
+      BASE_URL = base;
+      return detail;
+    })
+    .catch(function() {
+      return null;
+    });
+}
+
 function findBestDrama(info, mediaType) {
   var queries = buildSearchQueries(info);
   var bases = [PRIMARY_BASE_URL, FALLBACK_BASE_URL];
 
   function searchBase(baseIndex) {
     if (baseIndex >= bases.length) {
-      throw new Error("No strict KissKH match");
+      return Promise.resolve(null);
     }
 
     var base = bases[baseIndex];
+    var seen = {};
+    var candidates = [];
 
-    return Promise.all(
-      queries.map(function(query) {
-        return searchKissKh(base, query).catch(function() { return []; });
-      })
-    ).then(function(groups) {
-      var seen = {};
-      var candidates = [];
+    function addGroup(group) {
+      (group || []).forEach(function(item) {
+        if (!item || item.id === undefined) return;
+        var key = String(item.id);
+        if (seen[key]) return;
+        seen[key] = true;
+        candidates.push(item);
+      });
+    }
 
-      groups.forEach(function(group) {
-        (group || []).forEach(function(item) {
-          if (!item || item.id === undefined) return;
-          var key = String(item.id);
-          if (seen[key]) return;
-          seen[key] = true;
-          candidates.push(item);
-        });
+    function bestDirectCandidate(group) {
+      var list = (group || []).slice().sort(function(a, b) {
+        return candidateQuickScore(b, info, mediaType) -
+          candidateQuickScore(a, info, mediaType);
       });
 
-      candidates.sort(function(a, b) {
-        function quickScore(item) {
-          var best = 0;
-          var aliases = uniqueText([info.title, info.originalTitle].concat(info.aliases || []));
-          aliases.forEach(function(alias) {
-            best = Math.max(best, titleScore(item && item.title, alias));
-          });
-          return best + typePenalty(item, mediaType);
+      // Exact/near-exact title hits are common even when KissKH returns 50 rows.
+      // Verify only the strongest candidate first instead of fetching details
+      // for every candidate and waiting for all requests.
+      var best = list[0];
+      if (!best) return null;
+
+      var score = candidateQuickScore(best, info, mediaType);
+      var bestYear = candidateYear(best);
+      var cleanBest = normalizeTitle(cleanCandidateTitle(best.title));
+      var exactAlias = aliasList(info).some(function(alias) {
+        return cleanBest === normalizeTitle(alias);
+      });
+
+      if (
+        exactAlias &&
+        score >= 100 &&
+        (
+          !info.year ||
+          !bestYear ||
+          Math.abs(Number(info.year) - Number(bestYear)) <= 1
+        )
+      ) {
+        return best;
+      }
+
+      return null;
+    }
+
+    function runQuery(index) {
+      if (index >= queries.length) {
+        // No direct exact hit. Verify only the top three accumulated candidates.
+        var top = candidates.slice().sort(function(a, b) {
+          return candidateQuickScore(b, info, mediaType) -
+            candidateQuickScore(a, info, mediaType);
+        }).slice(0, 3);
+
+        function verifyTop(i) {
+          if (i >= top.length) return Promise.resolve(null);
+          return verifyCandidateDetail(base, top[i], info, mediaType)
+            .then(function(detail) {
+              return detail || verifyTop(i + 1);
+            });
         }
-        return quickScore(b) - quickScore(a);
-      });
+
+        return verifyTop(0);
+      }
+
+      return searchKissKh(base, queries[index])
+        .catch(function() { return []; })
+        .then(function(group) {
+          addGroup(group);
+
+          var direct = bestDirectCandidate(group);
+          if (direct) {
+            console.log(
+              "[KissKH] fast candidate query='" + queries[index] +
+              "' title='" + String(direct.title || "") +
+              "' year=" + (candidateYear(direct) || "?")
+            );
+
+            return verifyCandidateDetail(base, direct, info, mediaType)
+              .then(function(detail) {
+                if (detail) return detail;
+                return runQuery(index + 1);
+              });
+          }
+
+          return runQuery(index + 1);
+        });
+    }
+
+    return runQuery(0).then(function(detail) {
+      if (detail) return detail;
 
       console.log(
-        "[KissKH] candidates host=" + base +
-        " count=" + candidates.length +
-        (candidates.length ? " top=" + candidateSummary(candidates) : "")
+        "[KissKH] no match host=" + base +
+        " candidates=" + candidates.length +
+        (candidates.length ? " top=" + candidateSummary(
+          candidates.slice().sort(function(a, b) {
+            return candidateQuickScore(b, info, mediaType) -
+              candidateQuickScore(a, info, mediaType);
+          })
+        ) : "")
       );
 
-      candidates = candidates.slice(0, 10);
-      if (!candidates.length) return null;
-
-      return Promise.all(candidates.map(function(candidate) {
-        return getDramaDetail(base, candidate.id)
-          .then(function(detail) {
-            var aliases = uniqueText([info.title, info.originalTitle].concat(info.aliases || []));
-            var score = 0;
-
-            aliases.forEach(function(alias) {
-              score = Math.max(score, titleScore(detail && detail.title, alias));
-            });
-
-            var detailYear = String(
-              detail && (
-                detail.releaseDate ||
-                detail.release_date ||
-                detail.year ||
-                ""
-              ) || ""
-            ).split("-")[0];
-
-            score += yearScore(detailYear, info.year);
-            score += typePenalty(detail, mediaType);
-            score += typePenalty(candidate, mediaType);
-
-            // One-episode entries are strong movie evidence.
-            if (
-              mediaType === "movie" &&
-              detail &&
-              Array.isArray(detail.episodes) &&
-              detail.episodes.length === 1
-            ) {
-              score += 15;
-            }
-
-            return {
-              detail: detail,
-              candidate: candidate,
-              score: score,
-              year: detailYear
-            };
-          })
-          .catch(function() { return null; });
-      })).then(function(matches) {
-        matches = matches.filter(Boolean).sort(function(a, b) {
-          return b.score - a.score;
-        });
-
-        var best = matches[0];
-        if (!best || best.score < 75) {
-          return null;
-        }
-
-        if (
-          info.year &&
-          best.year &&
-          Math.abs(Number(info.year) - Number(best.year)) > 1
-        ) {
-          return null;
-        }
-
-        console.log(
-          "[KissKH] MATCH host=" + base +
-          " title='" + String(best.detail && best.detail.title || "") +
-          "' year=" + (best.year || "?") +
-          " score=" + Math.round(best.score)
-        );
-
-        BASE_URL = base;
-        return best.detail;
-      });
-    }).then(function(match) {
-      if (match) return match;
       return searchBase(baseIndex + 1);
     });
   }
 
-  return searchBase(0).catch(function(error) {
-    console.log(
-      "[KissKH] No strict match for " +
-      info.title + " (" + (info.year || "?") + ")" +
-      " queries=" + queries.join(" | ")
+  return searchBase(0).then(function(detail) {
+    if (detail) return detail;
+    throw new Error(
+      "No strict match for " + info.title + " (" + (info.year || "?") + ")"
     );
-    throw error;
   });
 }
-
 function selectEpisode(detail, mediaType, season, episode) {
   var episodes = Array.isArray(detail.episodes) ? detail.episodes : [];
   if (episodes.length === 0) throw new Error("No KissKH episodes");

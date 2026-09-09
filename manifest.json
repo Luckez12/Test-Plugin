@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -53,8 +53,8 @@
     {
       "id": "cinemode",
       "name": "CineMode",
-      "description": "CineMode ZXC capture fix excluding Next.js static assets and targeting real source/API requests",
-      "version": "2.0.3",
+      "description": "CineMode ZXC real-source capture fix that no longer stops on the player HTML request",
+      "version": "2.0.4",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

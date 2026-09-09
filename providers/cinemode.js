@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.0.3";
+var VERSION = "2.0.4";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -13,7 +13,7 @@ var BUDGET_MS = 8300;
 var PAGE_TIMEOUT_MS = 1500;
 var BUNDLE_TIMEOUT_MS = 1350;
 var ROUTE_WEBVIEW_MS = 3900;
-var PLAYER_WEBVIEW_MS = 2450;
+var PLAYER_WEBVIEW_MS = 3300;
 var VERIFY_MS = 900;
 
 var MEDIA_RE = /\.(?:m3u8|mp4|m4v|webm)(?:$|[?#])/i;
@@ -79,8 +79,7 @@ var ZXC_MATCH = [
   "/stream/",
   "/streams/",
   "getsource",
-  "get-source",
-  "server="
+  "get-source"
 ];
 
 
@@ -259,7 +258,7 @@ function likelySourceEndpoint(url) {
     var target = (u.pathname + "?" + u.searchParams.toString()).toLowerCase();
 
     return (
-      /\/api\/|\/source(?:s)?(?:\/|$)|\/playlist(?:\/|$)|\/manifest(?:\/|$)|\/master(?:\/|$)|\/playback(?:\/|$)|\/hls\/|\/stream(?:s)?(?:\/|$)|getsource|get-source|server=/.test(target)
+      /\/api\/|\/source(?:s)?(?:\/|$)|\/playlist(?:\/|$)|\/manifest(?:\/|$)|\/master(?:\/|$)|\/playback(?:\/|$)|\/hls\/|\/stream(?:s)?(?:\/|$)|getsource|get-source/.test(target)
     );
   } catch (_) {
     return false;
@@ -527,7 +526,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
     referer: playerStage ? BASE + "/" : BASE + "/",
     directLoad: true,
     timeoutMs: timeoutMs,
-    finishAfterFirstMs: playerStage ? 1100 : 850,
+    finishAfterFirstMs: playerStage ? 850 : 850,
 
     /*
      * CineMode is ad-supported and its watch action can navigate away from
@@ -543,7 +542,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
     clickX: 540,
     clickY: 600,
     clickDelaysMs: playerStage
-      ? [300, 700, 1250, 1850]
+      ? [350, 850, 1450, 2200, 2850]
       : [450, 950, 1550, 2350, 3200],
 
     match: playerStage && isZxc(startUrl) ? ZXC_MATCH : PLAYER_HINTS,
@@ -1071,11 +1070,18 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
     u = String(u || "").trim();
     if (!u || seen[u] || blocked(u)) return;
     if (!looksLikePlayer(u) || MEDIA_RE.test(u)) return;
+
+    /*
+     * ZXC canonical server=1 and server=2 were already added above.
+     * Do not add the same /player route without a server query again.
+     */
+    if (isZxc(u) && /\/player\//i.test(u)) return;
+
     seen[u] = true;
     list.push(u);
   });
 
-  list = list.slice(0, 3);
+  list = list.slice(0, 2);
   if (!list.length) return Promise.resolve(null);
 
   var remaining = BUDGET_MS - (Date.now() - startedAt) - VERIFY_MS - 200;
@@ -1101,6 +1107,8 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
 
         if (capturedPaths) {
           console.log("[CineMode] player capture paths=" + capturedPaths);
+        } else {
+          console.log("[CineMode] player capture paths=none");
         }
 
         var parsed = capturedRows(rows, u);

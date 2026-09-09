@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 var CryptoJS = null;
@@ -836,6 +836,19 @@ function verifyFastDirectCandidate(item, mediaType, index) {
   });
 }
 
+var fastVerifyCache = {};
+
+function verifyCachedCandidate(item, mediaType, index) {
+  var url = String(item && item.resourceLink || "");
+  if (!url) return Promise.resolve(null);
+  if (!fastVerifyCache[url]) {
+    fastVerifyCache[url] = verifyFastDirectCandidate(item, mediaType, index);
+  } else {
+    console.log("[MovieBox] reuse verified CDN host=" + hostOf(url));
+  }
+  return fastVerifyCache[url];
+}
+
 function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
   return fetchResolution(subjectId, mediaType, season, episode, resolution).then(function (items) {
     var candidates = uniqueCandidates(items).filter(function (item) {
@@ -849,7 +862,7 @@ function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
 
     function tryCandidate(i) {
       if (i >= candidates.length) return Promise.resolve(null);
-      return verifyFastDirectCandidate(candidates[i], mediaType, i + 1).then(function (stream) {
+      return verifyCachedCandidate(candidates[i], mediaType, i + 1).then(function (stream) {
         if (stream) {
           console.log("[MovieBox] READY q=" + stream.quality +
             " candidate=" + (i + 1) +
@@ -869,6 +882,7 @@ function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
 }
 
 function multiQualityFastDirect(subjectId, mediaType, season, episode) {
+  fastVerifyCache = {};
   var resolutions = [2160, 1080, 720];
   var ready = [];
   var seen = {};
@@ -878,7 +892,7 @@ function multiQualityFastDirect(subjectId, mediaType, season, episode) {
 
   function addStream(stream) {
     if (!stream || !stream.url) return;
-    var key = String(stream.quality || "") + "|" + String(stream.url || "");
+    var key = String(stream.url || "");
     if (seen[key]) return;
     seen[key] = true;
     ready.push(stream);

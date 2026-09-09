@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.0.2";
+var VERSION = "2.0.3";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -68,15 +68,19 @@ var ZXC_MATCH = [
   ".mp4",
   ".m4v",
   ".webm",
-  "playlist",
-  "manifest",
-  "master",
   "/api/",
-  "source",
-  "sources",
-  "playback",
+  "/source",
+  "/sources",
+  "/playlist",
+  "/manifest",
+  "/master",
+  "/playback",
   "/hls/",
-  "media"
+  "/stream/",
+  "/streams/",
+  "getsource",
+  "get-source",
+  "server="
 ];
 
 
@@ -232,10 +236,34 @@ function isZxc(url) {
          /(?:^|\.)player\.zxc(?:stream|prime)\.xyz$/i.test(hostOf(url));
 }
 
+
+function isStaticAssetUrl(url) {
+  var s = String(url || "");
+  var path = "";
+  try { path = new URL(s).pathname.toLowerCase(); }
+  catch (_) { path = s.toLowerCase(); }
+
+  if (/\/_next\/static\//i.test(path)) return true;
+  if (/\/static\/(?:media|chunks|css)\//i.test(path)) return true;
+  if (/\.(?:woff2?|ttf|otf|eot|css|js|map|png|jpe?g|gif|svg|ico|avif|webp)(?:$|[?#])/i.test(path)) {
+    return true;
+  }
+  return false;
+}
+
 function likelySourceEndpoint(url) {
-  var s = String(url || "").toLowerCase();
-  if (!/^https?:\/\//i.test(s) || blocked(s)) return false;
-  return /\/api\/|source|sources|playlist|manifest|master|playback|\/hls\/|media/.test(s);
+  if (isStaticAssetUrl(url)) return false;
+
+  try {
+    var u = new URL(String(url || ""));
+    var target = (u.pathname + "?" + u.searchParams.toString()).toLowerCase();
+
+    return (
+      /\/api\/|\/source(?:s)?(?:\/|$)|\/playlist(?:\/|$)|\/manifest(?:\/|$)|\/master(?:\/|$)|\/playback(?:\/|$)|\/hls\/|\/stream(?:s)?(?:\/|$)|getsource|get-source|server=/.test(target)
+    );
+  } catch (_) {
+    return false;
+  }
 }
 
 function routeUrl(id, type) {
@@ -499,7 +527,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
     referer: playerStage ? BASE + "/" : BASE + "/",
     directLoad: true,
     timeoutMs: timeoutMs,
-    finishAfterFirstMs: playerStage ? 650 : 850,
+    finishAfterFirstMs: playerStage ? 1100 : 850,
 
     /*
      * CineMode is ad-supported and its watch action can navigate away from
@@ -649,7 +677,7 @@ function capturedRows(rows, fallbackReferer) {
   (rows || []).forEach(function(row) {
     if (!row || !row.url) return;
     var url = String(row.url).trim();
-    if (!url || blocked(url)) return;
+    if (!url || blocked(url) || isStaticAssetUrl(url)) return;
 
     var referer =
       String(row.referer || row.referrer || fallbackReferer || BASE + "/");
@@ -956,6 +984,78 @@ function verifyFirst(list, limit) {
   });
 }
 
+
+function zxcApiProbeUrls(playerUrl, tmdbId, type, season, episode) {
+  var origin = originOf(playerUrl);
+  if (!origin) return [];
+
+  var mediaPath =
+    type === "tv"
+      ? encodeURIComponent(tmdbId) + "/" + encodeURIComponent(season) + "/" + encodeURIComponent(episode)
+      : encodeURIComponent(tmdbId);
+
+  return [
+    origin + "/api/source/" + type + "/" + mediaPath,
+    origin + "/api/sources/" + type + "/" + mediaPath,
+    origin + "/api/stream/" + type + "/" + mediaPath,
+    origin + "/api/streams/" + type + "/" + mediaPath
+  ];
+}
+
+function probeZxcApis(playerUrl, tmdbId, type, season, episode) {
+  var urls = zxcApiProbeUrls(playerUrl, tmdbId, type, season, episode);
+
+  return Promise.all(urls.map(function(apiUrl) {
+    return timeout(fetch(apiUrl, {
+      method: "GET",
+      headers: {
+        "User-Agent": UA,
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": playerUrl,
+        "Origin": originOf(playerUrl)
+      },
+      redirect: "follow"
+    }).then(function(res) {
+      var ct = "";
+      try { ct = String(res.headers.get("content-type") || "").toLowerCase(); } catch (_) {}
+
+      return res.text().then(function(text) {
+        if (!(res.status >= 200 && res.status < 300)) return null;
+
+        var candidates = sourceCandidatesFromResponse(
+          text,
+          res.url || apiUrl,
+          playerUrl,
+          {
+            "User-Agent": UA,
+            "Referer": playerUrl,
+            "Origin": originOf(playerUrl)
+          }
+        );
+
+        if (candidates.length) {
+          console.log(
+            "[CineMode] api-probe hit path=" +
+            (function() {
+              try { return new URL(res.url || apiUrl).pathname; } catch (_) { return "?"; }
+            })() +
+            " candidates=" + candidates.length
+          );
+        }
+
+        return verifyFirst(candidates, 4);
+      });
+    }), 1050, "zxc api probe").catch(function() {
+      return null;
+    });
+  })).then(function(results) {
+    for (var i = 0; i < results.length; i++) {
+      if (results[i]) return results[i];
+    }
+    return null;
+  });
+}
+
 function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
   var seen = {};
   var list = [];
@@ -990,6 +1090,19 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
   return Promise.all(list.map(function(u) {
     return webviewCapture(u, type, season, episode, eachTimeout, true)
       .then(function(rows) {
+        var capturedPaths = (rows || []).slice(0, 8).map(function(row) {
+          try {
+            var ru = new URL(String(row && row.url || ""));
+            return ru.pathname;
+          } catch (_) {
+            return "?";
+          }
+        }).join("|");
+
+        if (capturedPaths) {
+          console.log("[CineMode] player capture paths=" + capturedPaths);
+        }
+
         var parsed = capturedRows(rows, u);
 
         console.log(
@@ -1004,7 +1117,13 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
 
         return verifyFirst(parsed.direct, 4).then(function(hit) {
           if (hit) return hit;
-          return resolveCapturedEndpoints(parsed.endpoints);
+
+          return resolveCapturedEndpoints(parsed.endpoints).then(function(endpointHit) {
+            if (endpointHit) return endpointHit;
+
+            console.log("[CineMode] no usable captured source -> ZXC API probe");
+            return probeZxcApis(u, tmdbId, type, season, episode);
+          });
         });
       });
   })).then(function(results) {

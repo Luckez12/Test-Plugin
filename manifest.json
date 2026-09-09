@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -53,8 +53,8 @@
     {
       "id": "cinemode",
       "name": "CineMode",
-      "description": "CineMode ZXC source API decoder with nested JSON/base64 extraction and endpoint diagnostics",
-      "version": "2.0.2",
+      "description": "CineMode ZXC capture fix excluding Next.js static assets and targeting real source/API requests",
+      "version": "2.0.3",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

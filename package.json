@@ -9,6 +9,8 @@
     "test:provider": "node tests/test-provider.js"
   },
   "devDependencies": {
+    "cheerio-without-node-native": "1.0.0-rc.2",
+    "crypto-js": "^4.2.0",
     "esbuild": "^0.25.0"
   }
 }

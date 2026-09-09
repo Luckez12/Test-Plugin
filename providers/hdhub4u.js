@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "HDHub4u";
-var VERSION = "1.0.0";
+var VERSION = "1.0.1";
 var PRIMARY_BASE = "https://new5.hdhub4u.cl";
 var FALLBACK_BASES = ["https://hdhub4u.frl"];
 var DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
@@ -10,6 +10,8 @@ var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
 var UA = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 var PROVIDER_BUDGET_MS = 8800;
 var VERIFY_TIMEOUT_MS = 1350;
+var SEEK_VERIFY_TIMEOUT_MS = 1450;
+var SEEK_PROBE_OFFSET = 1048576;
 
 function cheerio() { return require("cheerio-without-node-native"); }
 
@@ -470,32 +472,145 @@ function responseMediaInfo(res, originalUrl) {
   return { playable: !!res && res.status >= 200 && res.status < 400 && !html && sizeOk && (manifest || media), url: finalUrl, total: total, type: ct };
 }
 
+function parseContentRangeStart(value) {
+  var m = String(value || "").match(/bytes\s+(\d+)-(\d+)\/(\d+|\*)/i);
+  return m ? Number(m[1]) : -1;
+}
+
+function isR2Storage(url) {
+  return /(?:^|\.)r2\.cloudflarestorage\.com$/i.test(hostOf(url));
+}
+
+function verifySeekRange(url, referer, total) {
+  /*
+   * A 0-1 probe only proves that the file exists. VUEO fast-forward needs
+   * a non-zero byte-range request to be honoured as 206, otherwise the
+   * player can fall back to byte 0 and appear to restart the video.
+   */
+  var maxStart =
+    total && total > SEEK_PROBE_OFFSET + 4096
+      ? Math.min(
+          Math.max(SEEK_PROBE_OFFSET, Math.floor(total / 4)),
+          Math.max(SEEK_PROBE_OFFSET, total - 4096)
+        )
+      : SEEK_PROBE_OFFSET;
+
+  var end = maxStart + 1023;
+
+  return withTimeout(fetch(url, {
+    method: "GET",
+    redirect: "follow",
+    headers: mergeHeaders({
+      "Accept": "*/*",
+      "Range": "bytes=" + maxStart + "-" + end,
+      "Referer": referer || ""
+    })
+  }), SEEK_VERIFY_TIMEOUT_MS, "seek-range").then(function(res) {
+    var cr = headerGet(res, "content-range");
+    var start = parseContentRangeStart(cr);
+    var ok = res.status === 206 && start === maxStart;
+
+    console.log(
+      "[HDHub4u] seek-probe host=" +
+      hostOf((res && res.url) || url) +
+      " status=" +
+      res.status +
+      " start=" +
+      start +
+      " expected=" +
+      maxStart +
+      " ok=" +
+      ok
+    );
+
+    return ok;
+  }).catch(function() {
+    return false;
+  });
+}
+
 function verifyDirect(url, referer) {
+  function finish(res, originalUrl) {
+    var info = responseMediaInfo(res, originalUrl);
+    if (!info.playable) return Promise.resolve(null);
+
+    var manifest =
+      /mpegurl|dash\+xml/.test(info.type) ||
+      /\.(?:m3u8|mpd)(?:$|[?#])/i.test(info.url);
+
+    if (manifest) {
+      console.log(
+        "[HDHub4u] verify host=" +
+        hostOf(info.url) +
+        " status=" +
+        res.status +
+        " manifest=true ok=true"
+      );
+      return Promise.resolve({
+        url: info.url,
+        seekable: true,
+        weakSeek: false,
+        total: info.total || 0
+      });
+    }
+
+    console.log(
+      "[HDHub4u] verify host=" +
+      hostOf(info.url) +
+      " status=" +
+      res.status +
+      " MB=" +
+      (info.total ? Math.round(info.total / 1048576) : "?") +
+      " ok=true"
+    );
+
+    return verifySeekRange(
+      info.url,
+      referer,
+      info.total || 0
+    ).then(function(seekable) {
+      return {
+        url: info.url,
+        seekable: seekable,
+        /*
+         * Raw R2 download objects are allowed only as final fallback because
+         * some Android players restart on seek even though byte 0 returns 206.
+         */
+        weakSeek: !seekable || isR2Storage(info.url),
+        total: info.total || 0
+      };
+    });
+  }
+
   function range() {
     return withTimeout(fetch(url, {
       method: "GET",
       redirect: "follow",
-      headers: mergeHeaders({ "Accept": "*/*", "Range": "bytes=0-1", "Referer": referer || "" })
+      headers: mergeHeaders({
+        "Accept": "*/*",
+        "Range": "bytes=0-1",
+        "Referer": referer || ""
+      })
     }), VERIFY_TIMEOUT_MS, "range").then(function(res) {
-      var info = responseMediaInfo(res, url);
-      console.log("[HDHub4u] verify host=" + hostOf(url) + " status=" + res.status + " MB=" + (info.total ? Math.round(info.total / 1048576) : "?") + " ok=" + info.playable);
-      return info.playable ? info.url : null;
+      return finish(res, url);
     });
   }
 
   return withTimeout(fetch(url, {
     method: "HEAD",
     redirect: "follow",
-    headers: mergeHeaders({ "Accept": "*/*", "Referer": referer || "" })
+    headers: mergeHeaders({
+      "Accept": "*/*",
+      "Referer": referer || ""
+    })
   }), VERIFY_TIMEOUT_MS, "head").then(function(res) {
     var info = responseMediaInfo(res, url);
-    if (info.playable) {
-      console.log("[HDHub4u] verify host=" + hostOf(url) + " status=" + res.status + " MB=" + (info.total ? Math.round(info.total / 1048576) : "?") + " ok=true");
-      return info.url;
-    }
+    if (info.playable) return finish(res, url);
     if (/text\/html|application\/json/.test(info.type)) return null;
     return range().catch(function() { return null; });
-  }).catch(function() { return range().catch(function() { return null; }); });
+  }).catch(function() {
+    return range().catch(function() { return null; });
+  });
 }
 
 function pixelDirect(url) {
@@ -519,14 +634,20 @@ function collectAnchors(html, base) {
 
 function serverScore(url, label) {
   var s = (String(url || "") + " " + String(label || "")).toLowerCase();
-  if (/workers\.dev|pixeldrain/.test(s)) return 1000;
-  if (/fsl server|s3 server|download file|10gbps/.test(s)) return 950;
+
+  /* Playback/seek priority, not download-speed priority. */
+  if (/hubcdn/.test(s)) return 1250;
+  if (/pixeldrain/.test(s)) return 1200;
+  if (/workers\.dev/.test(s)) return 1150;
+  if (/fsl server|s3 server/.test(s)) return 1080;
+  if (/10gbps/.test(s)) return 1000;
   if (/hubcloud/.test(s)) return 900;
-  if (/hubdrive/.test(s)) return 800;
-  if (/hubcdn/.test(s)) return 760;
-  if (/hblinks/.test(s)) return 700;
-  if (/streamtape/.test(s)) return 500;
-  return 100;
+  if (/hubdrive/.test(s)) return 840;
+  if (/hblinks/.test(s)) return 780;
+  if (/streamtape/.test(s)) return 650;
+  if (/download file/.test(s)) return 500;
+  if (/r2\.cloudflarestorage\.com/.test(s)) return 200;
+  return 300;
 }
 
 function resolveHubCdn(url, referer) {
@@ -538,7 +659,7 @@ function resolveHubCdn(url, referer) {
     var direct = idx >= 0 ? decoded.substring(idx + 5) : "";
     if (!direct) return null;
     return verifyDirect(direct, url).then(function(v) {
-      return v ? { url: v, referer: url, label: "HubCDN" } : null;
+      return v ? { url: v.url, referer: url, label: "HubCDN", weakSeek: !!v.weakSeek } : null;
     });
   }).catch(function() { return null; });
 }
@@ -583,26 +704,112 @@ function resolveHubCloud(url, referer) {
     });
     console.log("[HDHub4u] HubCloud buttons=" + buttons.length + " host=" + hostOf(page.pageUrl));
 
+    var weakFallback = null;
+
+    function acceptOrContinue(hit, index) {
+      if (!hit) return next(index + 1);
+      if (hit.weakSeek || isR2Storage(hit.url)) {
+        if (!weakFallback) weakFallback = hit;
+        console.log(
+          "[HDHub4u] defer weak-seek host=" +
+          hostOf(hit.url) +
+          " label='" +
+          (hit.label || "") +
+          "'"
+        );
+        return next(index + 1);
+      }
+      return hit;
+    }
+
     function next(i) {
-      if (i >= buttons.length || i >= 6) return Promise.resolve(null);
+      if (i >= buttons.length || i >= 8) {
+        return Promise.resolve(weakFallback);
+      }
+
       var b = buttons[i];
       var u = b.url;
       var label = String(b.label || "").toLowerCase();
-      if (/privacy|telegram|contact|home|login/.test(label) && !/download|server|10gbps/.test(label)) return next(i + 1);
+
+      if (
+        /privacy|telegram|contact|home|login/.test(label) &&
+        !/download|server|10gbps/.test(label)
+      ) {
+        return next(i + 1);
+      }
+
       if (/pixeldrain/i.test(u)) {
         var pd = pixelDirect(u);
-        return verifyDirect(pd, page.pageUrl).then(function(v) { return v ? { url: v, referer: page.pageUrl, label: "PixelDrain" } : next(i + 1); });
+        return verifyDirect(pd, page.pageUrl).then(function(v) {
+          return acceptOrContinue(
+            v
+              ? {
+                  url: v.url,
+                  referer: page.pageUrl,
+                  label: "PixelDrain",
+                  weakSeek: !!v.weakSeek
+                }
+              : null,
+            i
+          );
+        });
       }
-      if (/hubcdn/i.test(u)) return resolveHubCdn(u, page.pageUrl).then(function(v) { return v || next(i + 1); });
-      if (/hblinks/i.test(u)) return resolveHblinks(u, page.pageUrl).then(function(v) { return v || next(i + 1); });
-      if (/hubdrive/i.test(u)) return resolveHubDrive(u, page.pageUrl).then(function(v) { return v || next(i + 1); });
-      if (/workers\.dev|\.(?:mp4|mkv|webm|m3u8|m4v)(?:$|[?#])/i.test(u) || /fsl server|s3 server|download file|10gbps|buzzserver/i.test(label)) {
+
+      if (/hubcdn/i.test(u)) {
+        return resolveHubCdn(u, page.pageUrl).then(function(v) {
+          return acceptOrContinue(v, i);
+        });
+      }
+
+      if (/hblinks/i.test(u)) {
+        return resolveHblinks(u, page.pageUrl).then(function(v) {
+          return acceptOrContinue(v, i);
+        });
+      }
+
+      if (/hubdrive/i.test(u)) {
+        return resolveHubDrive(u, page.pageUrl).then(function(v) {
+          return acceptOrContinue(v, i);
+        });
+      }
+
+      if (
+        /workers\.dev|\.(?:mp4|mkv|webm|m3u8|m4v)(?:$|[?#])/i.test(u) ||
+        /fsl server|s3 server|download file|10gbps|buzzserver/i.test(label)
+      ) {
         var direct = u;
         var lm = direct.match(/[?&]link=([^&]+)/i);
-        if (lm) { try { direct = decodeURIComponent(lm[1]); } catch (_) { direct = lm[1]; } }
-        if (/buzzserver/i.test(label) && !/\/download(?:$|[?#])/i.test(direct)) direct = direct.replace(/\/$/, "") + "/download";
-        return verifyDirect(direct, page.pageUrl).then(function(v) { return v ? { url: v, referer: page.pageUrl, label: b.label || "Direct" } : next(i + 1); });
+
+        if (lm) {
+          try {
+            direct = decodeURIComponent(lm[1]);
+          } catch (_) {
+            direct = lm[1];
+          }
+        }
+
+        if (
+          /buzzserver/i.test(label) &&
+          !/\/download(?:$|[?#])/i.test(direct)
+        ) {
+          direct = direct.replace(/\/$/, "") + "/download";
+        }
+
+        return verifyDirect(direct, page.pageUrl).then(function(v) {
+          return acceptOrContinue(
+            v
+              ? {
+                  url: v.url,
+                  referer: page.pageUrl,
+                  label: b.label || "Direct",
+                  weakSeek: !!v.weakSeek
+                }
+              : null,
+            i
+          );
+        });
       }
+
       return next(i + 1);
     }
     return next(0);
@@ -622,7 +829,7 @@ function resolveStreamTape(url, referer) {
     var m = x.text.match(/['"](\/\/streamtape\.com\/get_video[^'"<>]+)['"]/i);
     if (!m) return null;
     var direct = "https:" + m[1].replace(/&amp;/g, "&");
-    return verifyDirect(direct, x.url).then(function(v) { return v ? { url: v, referer: x.url, label: "StreamTape" } : null; });
+    return verifyDirect(direct, x.url).then(function(v) { return v ? { url: v.url, referer: x.url, label: "StreamTape", weakSeek: !!v.weakSeek } : null; });
   }).catch(function() { return null; });
 }
 
@@ -634,7 +841,7 @@ function resolveServer(url, referer) {
     var host = hostOf(resolved);
     if (/pixeldrain/i.test(host)) {
       var pd = pixelDirect(resolved);
-      return verifyDirect(pd, referer).then(function(v) { return v ? { url: v, referer: referer || "", label: "PixelDrain" } : null; });
+      return verifyDirect(pd, referer).then(function(v) { return v ? { url: v.url, referer: referer || "", label: "PixelDrain", weakSeek: !!v.weakSeek } : null; });
     }
     if (/hubcloud/i.test(host)) return resolveHubCloud(resolved, referer);
     if (/hubdrive/i.test(host)) return resolveHubDrive(resolved, referer);
@@ -643,7 +850,7 @@ function resolveServer(url, referer) {
     if (/streamtape/i.test(host)) return resolveStreamTape(resolved, referer);
     if (/linkrit/i.test(host)) return null;
     if (/workers\.dev|\.(?:mp4|mkv|webm|m3u8|m4v)(?:$|[?#])/i.test(resolved)) {
-      return verifyDirect(resolved, referer).then(function(v) { return v ? { url: v, referer: referer || "", label: host } : null; });
+      return verifyDirect(resolved, referer).then(function(v) { return v ? { url: v.url, referer: referer || "", label: host, weakSeek: !!v.weakSeek } : null; });
     }
     return null;
   }).catch(function() { return null; });
@@ -770,7 +977,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     });
   }).then(function(hit) {
     if (!hit || !hit.url) return [];
-    console.log("[HDHub4u] FAST HIT host=" + hostOf(hit.url) + " q=" + qualityLabel(hit.quality) + " elapsed=" + (Date.now() - started) + "ms");
+    console.log("[HDHub4u] FAST HIT host=" + hostOf(hit.url) + " q=" + qualityLabel(hit.quality) + " seekSafe=" + (!hit.weakSeek) + " elapsed=" + (Date.now() - started) + "ms");
     return [toStream(hit, info, type, s, e)];
   });
 

@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.1.2";
+const VERSION = "1.1.3";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -641,26 +641,58 @@ function resolveDood(url, referer) {
   }).then(function (response) {
     var finalEmbedUrl = response.url || embedUrl;
     var host = originOf(finalEmbedUrl);
-    var passMatch = response.text.match(/\/pass_md5\/[^'"\s<]+/i);
+    var html = String(response.text || "");
+    var passMatch = html.match(/\/pass_md5\/[^'"\s<]+/i);
     if (!passMatch) return [];
+
     var passUrl = /^https?:\/\//i.test(passMatch[0]) ? passMatch[0] : host + passMatch[0];
-    var token = passUrl.substring(passUrl.lastIndexOf("/") + 1);
+
+    // Dood/DSV uses the player token from the embed page. Older builds used
+    // the last pass_md5 path segment, which can produce a URL that probes once
+    // but later fails in the native player.
+    var tokenMatch = html.match(/[?&]token=([a-z0-9]+)(?:[&'"]|$)/i);
+    var token = tokenMatch && tokenMatch[1]
+      ? tokenMatch[1]
+      : passUrl.substring(passUrl.lastIndexOf("/") + 1);
     if (!token) return [];
 
     return fetchText(passUrl, {
-      headers: { "Accept": "*/*", "Referer": finalEmbedUrl, "User-Agent": USER_AGENT }
+      headers: {
+        "Accept": "*/*",
+        "Referer": finalEmbedUrl,
+        "User-Agent": USER_AGENT
+      }
     }).then(function (prefix) {
       var base = String(prefix || "").trim();
       if (!/^https?:\/\//i.test(base)) return [];
-      var finalUrl = base + randomToken(10) + "?token=" + encodeURIComponent(token);
+
+      // Required Dood signature format:
+      // {pass response}{random10}?token={token}&expiry={unix ms}
+      var finalUrl = base + randomToken(10) +
+        "?token=" + encodeURIComponent(token) +
+        "&expiry=" + String(Date.now());
+
+      console.log("[PencuriMovie] DSV signed direct host=" + hostOf(finalUrl) +
+        " tokenSource=" + (tokenMatch ? "embed" : "pass"));
+
       return [{
         url: finalUrl,
-        referer: host + "/",
-        label: "Dood",
-        headers: { "Accept": "*/*", "Referer": host + "/", "User-Agent": USER_AGENT }
+        // The exact embed URL is required by Dood-style CDNs. Do not replace
+        // it with only the origin/root when handing the stream to VUEO.
+        referer: finalEmbedUrl,
+        label: "DSV",
+        headers: {
+          "Accept": "*/*",
+          "Referer": finalEmbedUrl,
+          "User-Agent": USER_AGENT
+        }
       }];
     });
-  }).catch(function () { return []; });
+  }).catch(function (error) {
+    console.log("[PencuriMovie] DSV resolve failed=" +
+      (error && error.message ? error.message : String(error)));
+    return [];
+  });
 }
 
 function resolveMixDrop(url, referer) {
@@ -1237,7 +1269,9 @@ function formatStreams(streams) {
     if (!headers["Accept"]) headers["Accept"] = "*/*";
 
     if (!stream.noReferer) {
-      headers["Referer"] = stream.referer || headers["Referer"] || originOf(url) + "/";
+      headers["Referer"] = headers["Referer"] || headers["referer"] ||
+        stream.referer || originOf(url) + "/";
+      delete headers["referer"];
     } else {
       delete headers["Referer"];
       delete headers["referer"];

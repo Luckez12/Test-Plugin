@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -153,8 +153,8 @@
     {
       "id": "pencurimovie",
       "name": "PencuriMovie",
-      "description": "PencuriMovie DSV-first provider that avoids background mirror requests after a verified direct source is found",
-      "version": "1.1.2",
+      "description": "PencuriMovie DSV-first provider with corrected signed Dood/DSV URL expiry, player token and exact embed Referer",
+      "version": "1.1.3",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

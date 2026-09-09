@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -53,19 +53,20 @@
     {
       "id": "cinemode",
       "name": "CineMode",
-      "description": "CineMode exact-TMDB-route WebView provider with external player navigation and verified direct playback",
-      "version": "1.0.3",
+      "description": "CineMode real-site rebuild using exact TMDB routes, deployed bundle discovery, popup player chaining and verified direct playback",
+      "version": "2.0.0",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",
         "tv"
       ],
       "filename": "providers/cinemode.js",
-      "enabled": false,
+      "enabled": true,
       "hasSettings": false,
       "formats": [
         "m3u8",
-        "mp4"
+        "mp4",
+        "webm"
       ],
       "contentLanguage": [
         "en"

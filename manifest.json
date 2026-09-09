@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -179,8 +179,8 @@
     {
       "id": "moviebox",
       "name": "MovieBox",
-      "description": "MovieBox mobile API provider with fast verified direct resource playback",
-      "version": "1.0.8",
+      "description": "MovieBox fast parallel multi-quality provider with verified 4K, 1080p and 720p direct resources",
+      "version": "1.1.0",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

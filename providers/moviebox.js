@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.0.8";
+const VERSION = "1.1.0";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 var CryptoJS = null;
@@ -667,6 +667,18 @@ function hostOf(url) {
   return String(url || "").replace(/^https?:\/\//i, "").split("/")[0];
 }
 
+function qualityName(value) {
+  var q = Number(value || 0);
+  if (q >= 2160) return "4K";
+  return q ? q + "p" : "Auto";
+}
+
+function waitMs(ms, value) {
+  return new Promise(function (resolve) {
+    setTimeout(function () { resolve(value); }, ms);
+  });
+}
+
 function directCandidateScore(item) {
   var score = 0;
   var resolution = Number(item && (item.resolution || item._requestedResolution) || 0);
@@ -810,11 +822,12 @@ function verifyFastDirectCandidate(item, mediaType, index) {
       " ok=" + ok);
 
     if (!ok) return null;
+    var qLabel = qualityName(qn);
     return {
       name: PROVIDER,
-      title: "MovieBox • " + (qn ? qn + "p" : "Auto") + " • Direct",
+      title: "MovieBox • " + qLabel + " • Direct",
       url: String(item.resourceLink),
-      quality: qn ? qn + "p" : "Auto",
+      quality: qLabel,
       headers: {
         "User-Agent": MOBILE_UA,
         "Accept": "*/*"
@@ -823,48 +836,117 @@ function verifyFastDirectCandidate(item, mediaType, index) {
   });
 }
 
-function fastDirectByResolution(subjectId, mediaType, season, episode) {
-  var resolutions = [1080, 720, 480, 360];
+function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
+  return fetchResolution(subjectId, mediaType, season, episode, resolution).then(function (items) {
+    var candidates = uniqueCandidates(items).filter(function (item) {
+      return /^https?:\/\//i.test(String(item && item.resourceLink || ""));
+    }).sort(function (a, b) {
+      return directCandidateScore(b) - directCandidateScore(a);
+    }).slice(0, 2);
 
-  function tryResolution(rIndex) {
-    if (rIndex >= resolutions.length) return Promise.resolve([]);
-    var resolution = resolutions[rIndex];
+    console.log("[MovieBox] quality " + qualityName(resolution) + " candidates=" + candidates.length);
+    if (!candidates.length) return null;
 
-    return fetchResolution(subjectId, mediaType, season, episode, resolution).then(function (items) {
-      var candidates = uniqueCandidates(items).filter(function (item) {
-        return /^https?:\/\//i.test(String(item && item.resourceLink || ""));
-      }).sort(function (a, b) {
-        return directCandidateScore(b) - directCandidateScore(a);
-      }).slice(0, 3);
+    function tryCandidate(i) {
+      if (i >= candidates.length) return Promise.resolve(null);
+      return verifyFastDirectCandidate(candidates[i], mediaType, i + 1).then(function (stream) {
+        if (stream) {
+          console.log("[MovieBox] READY q=" + stream.quality +
+            " candidate=" + (i + 1) +
+            " host=" + hostOf(stream.url));
+          return stream;
+        }
+        return tryCandidate(i + 1);
+      });
+    }
 
-      if (!candidates.length) return tryResolution(rIndex + 1);
+    return tryCandidate(0);
+  }).catch(function (error) {
+    console.log("[MovieBox] quality " + qualityName(resolution) +
+      " error=" + (error && error.message ? error.message : String(error)));
+    return null;
+  });
+}
 
-      function tryCandidate(i) {
-        if (i >= candidates.length) return tryResolution(rIndex + 1);
-        return verifyFastDirectCandidate(candidates[i], mediaType, i + 1).then(function (stream) {
-          if (stream) {
-            console.log("[MovieBox] fast return q=" + stream.quality + " candidate=" + (i + 1));
-            return [stream];
-          }
-          return tryCandidate(i + 1);
-        });
+function multiQualityFastDirect(subjectId, mediaType, season, episode) {
+  var resolutions = [2160, 1080, 720];
+  var ready = [];
+  var seen = {};
+  var firstReadyResolve = null;
+  var firstReady = new Promise(function (resolve) { firstReadyResolve = resolve; });
+  var firstSignaled = false;
+
+  function addStream(stream) {
+    if (!stream || !stream.url) return;
+    var key = String(stream.quality || "") + "|" + String(stream.url || "");
+    if (seen[key]) return;
+    seen[key] = true;
+    ready.push(stream);
+    ready.sort(function (a, b) {
+      function rank(q) {
+        if (q === "4K") return 2160;
+        var n = parseInt(String(q || ""), 10);
+        return isFinite(n) ? n : 0;
       }
-
-      return tryCandidate(0);
-    }).catch(function (error) {
-      console.log("[MovieBox] fast resource " + resolution + "p error=" + (error && error.message ? error.message : String(error)));
-      return tryResolution(rIndex + 1);
+      return rank(b.quality) - rank(a.quality);
     });
+    if (!firstSignaled) {
+      firstSignaled = true;
+      firstReadyResolve(true);
+    }
   }
 
-  return tryResolution(0);
+  var tasks = resolutions.map(function (resolution) {
+    return Promise.race([
+      resolveFastQuality(subjectId, mediaType, season, episode, resolution),
+      waitMs(3600, null)
+    ]).then(function (stream) {
+      addStream(stream);
+      return stream;
+    });
+  });
+
+  var allDone = Promise.all(tasks);
+
+  // Return quickly after the first playable quality, but give the other
+  // parallel quality requests a short grace window to finish.
+  var firstWindow = firstReady.then(function () {
+    return Promise.race([
+      allDone,
+      waitMs(1200, null)
+    ]).then(function () { return ready.slice(); });
+  });
+
+  return Promise.race([
+    allDone.then(function () { return ready.slice(); }),
+    firstWindow,
+    waitMs(4400, null).then(function () { return ready.slice(); })
+  ]).then(function (streams) {
+    streams = streams || [];
+    if (streams.length) {
+      console.log("[MovieBox] multi-quality ready=" + streams.map(function (s) {
+        return s.quality + ":" + hostOf(s.url);
+      }).join(","));
+      return streams;
+    }
+
+    // Compatibility fallback for titles where MovieBox only exposes low quality.
+    function tryLower(i) {
+      var lower = [480, 360];
+      if (i >= lower.length) return Promise.resolve([]);
+      return resolveFastQuality(subjectId, mediaType, season, episode, lower[i]).then(function (stream) {
+        return stream ? [stream] : tryLower(i + 1);
+      });
+    }
+    return tryLower(0);
+  });
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
   episode = Number(episode || 1);
-  console.log("[MovieBox] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : "") + " region=US sp=90101 fastDirect=true");
+  console.log("[MovieBox] v" + VERSION + " TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : "") + " region=US sp=90101 multiQuality=true");
 
   var info = null;
   var matchedSubjectId = null;
@@ -882,7 +964,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       }
       matchedSubjectId = String(item.subjectId || "").trim();
       console.log("[MovieBox] matched title='" + String(item.title || "") + "' year=" + parseYear(item.releaseDate) + " id=" + matchedSubjectId);
-      return fastDirectByResolution(matchedSubjectId, mediaType, season, episode);
+      return multiQualityFastDirect(matchedSubjectId, mediaType, season, episode);
     })
     .then(function (streams) {
       streams = streams || [];

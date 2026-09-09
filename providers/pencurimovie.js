@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.0.2";
+const VERSION = "1.1.0";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -528,6 +528,12 @@ function hostOf(url) {
   return m ? m[1].toLowerCase() : "";
 }
 
+function waitMs(ms, value) {
+  return new Promise(function (resolve) {
+    setTimeout(function () { resolve(value); }, ms);
+  });
+}
+
 function decodeHtmlEntities(value) {
   return String(value || "")
     .replace(/&amp;/g, "&")
@@ -1033,6 +1039,136 @@ function probeDoodStream(stream) {
   });
 }
 
+function verifyFastStream(stream) {
+  var url = String(stream && stream.url || "").trim();
+  if (!url) return Promise.resolve(null);
+
+  var headers = {};
+  var supplied = stream.headers || {};
+  Object.keys(supplied).forEach(function (key) { headers[key] = supplied[key]; });
+  if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
+  if (!headers["Accept"]) headers["Accept"] = "*/*";
+  if (!stream.noReferer && !headers["Referer"] && !headers["referer"]) {
+    headers["Referer"] = stream.referer || originOf(url) + "/";
+  }
+  headers["Range"] = "bytes=0-2047";
+
+  var probe = fetch(url, {
+    method: "GET",
+    headers: headers
+  }).then(function (res) {
+    var status = res ? Number(res.status || 0) : 0;
+    var contentType = "";
+    try {
+      if (res && res.headers && res.headers.get) {
+        contentType = String(res.headers.get("content-type") || "").toLowerCase();
+      }
+    } catch (_) {}
+
+    if (status !== 200 && status !== 206) return null;
+    if (/text\/html|application\/json|text\/plain/.test(contentType)) return null;
+
+    if (/mpegurl|video\//.test(contentType)) {
+      console.log("[PencuriMovie] VERIFIED host=" + hostOf(url) +
+        " status=" + status + " type='" + contentType + "'");
+      return stream;
+    }
+
+    if (!res || typeof res.arrayBuffer !== "function") {
+      return stream;
+    }
+
+    return res.arrayBuffer().then(function (buffer) {
+      var bytes = new Uint8Array(buffer || new ArrayBuffer(0));
+      var limit = Math.min(bytes.length, 256);
+      var ascii = "";
+      for (var i = 0; i < limit; i++) {
+        var c = bytes[i];
+        ascii += c >= 32 && c <= 126 ? String.fromCharCode(c) : ".";
+      }
+
+      var looksMedia =
+        ascii.indexOf("#EXTM3U") >= 0 ||
+        ascii.indexOf("ftyp") >= 0 ||
+        /\.(?:m3u8|mp4|m4v|mkv|webm)(?:[?#]|$)/i.test(url);
+
+      if (!looksMedia) return null;
+
+      console.log("[PencuriMovie] VERIFIED host=" + hostOf(url) +
+        " status=" + status + " type='" + contentType + "'");
+      return stream;
+    }).catch(function () {
+      return /\.(?:m3u8|mp4|m4v|mkv|webm)(?:[?#]|$)/i.test(url) ? stream : null;
+    });
+  }).catch(function () {
+    return null;
+  });
+
+  return Promise.race([
+    probe,
+    waitMs(1300, null)
+  ]);
+}
+
+function verifyFirstFast(streams) {
+  var list = (streams || []).slice(0, 3);
+  var index = 0;
+
+  function next() {
+    if (index >= list.length) return Promise.resolve(null);
+    var stream = list[index++];
+    return verifyFastStream(stream).then(function (verified) {
+      return verified || next();
+    });
+  }
+
+  return next();
+}
+
+function firstVerifiedMirror(tasks, maxWaitMs) {
+  return new Promise(function (resolve) {
+    if (!tasks.length) return resolve([]);
+    var finished = false;
+    var pending = tasks.length;
+
+    var timer = setTimeout(function () {
+      if (finished) return;
+      finished = true;
+      resolve([]);
+    }, maxWaitMs);
+
+    tasks.forEach(function (task) {
+      Promise.resolve(task).then(function (group) {
+        if (finished) return;
+        return verifyFirstFast(group || []).then(function (stream) {
+          if (finished) return;
+          if (stream) {
+            finished = true;
+            clearTimeout(timer);
+            resolve([stream]);
+            return;
+          }
+
+          pending--;
+          if (pending <= 0) {
+            finished = true;
+            clearTimeout(timer);
+            resolve([]);
+          }
+        });
+      }).catch(function () {
+        if (finished) return;
+        pending--;
+        if (pending <= 0) {
+          finished = true;
+          clearTimeout(timer);
+          resolve([]);
+        }
+      });
+    });
+  });
+}
+
 function filterDeadDoodStreams(streams) {
   var list = streams || [];
   var doodIndexes = [];
@@ -1126,28 +1262,48 @@ function formatStreams(streams) {
 function resolveMirrors(mirrors, pageUrl) {
   var selected = (mirrors || []).slice().sort(function (a, b) {
     return mirrorPriority(a) - mirrorPriority(b);
-  }).slice(0, 6);
+  }).slice(0, 5);
 
   console.log("[PencuriMovie] mirrors=" + mirrors.length);
   console.log("[PencuriMovie] mirror hosts=" + selected.map(function (x) {
     return hostOf(x.url) + "[" + String(x.label || "") + "]";
   }).join(" | "));
 
-  return Promise.all(selected.map(function (mirror) {
+  if (!selected.length) return Promise.resolve([]);
+
+  // Fast lane: start the best three mirrors together and return as soon as
+  // one verified direct media URL is available. Do not wait for every host.
+  var fast = selected.slice(0, 3).map(function (mirror) {
     return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
-  })).then(function (groups) {
-    var flat = [];
-    groups.forEach(function (group) { flat = flat.concat(group || []); });
-    return flat;
+  });
+
+  return firstVerifiedMirror(fast, 3000).then(function (ready) {
+    if (ready.length) {
+      console.log("[PencuriMovie] fast-first ready host=" + hostOf(ready[0].url));
+      return ready;
+    }
+
+    // Short fallback lane for remaining mirrors.
+    var fallback = selected.slice(3, 5).map(function (mirror) {
+      return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
+    });
+
+    return firstVerifiedMirror(fallback, 1800).then(function (fallbackReady) {
+      if (fallbackReady.length) {
+        console.log("[PencuriMovie] fallback ready host=" + hostOf(fallbackReady[0].url));
+      }
+      return fallbackReady;
+    });
   });
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
+  var startedAt = Date.now();
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
   episode = Number(episode || 1);
 
-  console.log("[PencuriMovie] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : ""));
+  console.log("[PencuriMovie] v" + VERSION + " TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : "") + " fastFirst=true");
   console.log("[PencuriMovie] base=" + BASE);
 
   return getTmdbDetails(tmdbId, mediaType)
@@ -1167,11 +1323,10 @@ function getStreams(tmdbId, mediaType, season, episode) {
       return resolveMirrors(mirrors, playback.url);
     })
     .then(function (resolved) {
-      return filterDeadDoodStreams(resolved || []);
-    })
-    .then(function (resolved) {
       var streams = formatStreams(resolved || []);
-      console.log("[PencuriMovie] v" + VERSION + " playable sources=" + streams.length);
+      console.log("[PencuriMovie] v" + VERSION +
+        " playable sources=" + streams.length +
+        " elapsed=" + (Date.now() - startedAt) + "ms");
       return streams;
     })
     .catch(function (error) {

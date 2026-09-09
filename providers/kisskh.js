@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.7";
+var VERSION = "1.0.8";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
@@ -244,9 +244,17 @@ function getTmdbInfo(tmdbId, mediaType) {
                 ? String(directContext.year) + "-01-01" : ""
             };
 
-        console.log("[KissKH] metadata=shared-direct elapsed=" +
-          (Date.now() - started) + "ms");
-        return Promise.resolve(normalizeData(directTmdb, directContext));
+        var directInfo = normalizeData(directTmdb, directContext);
+
+        // Some VUEO builds expose VUEO_DISCOVERY_CONTEXT before its title/TMDB
+        // payload is populated. Do not accept an empty shell as valid metadata.
+        if (directInfo && directInfo.title) {
+          console.log("[KissKH] metadata=shared-direct elapsed=" +
+            (Date.now() - started) + "ms");
+          return Promise.resolve(directInfo);
+        }
+
+        console.log("[KissKH] metadata=shared-direct-empty fallback=true");
       }
 
       if (typeof globalThis.vueoDiscoveryContext === "function") {
@@ -257,9 +265,13 @@ function getTmdbInfo(tmdbId, mediaType) {
               var data = context.tmdb && typeof context.tmdb === "object"
                 ? context.tmdb
                 : {};
-              console.log("[KissKH] metadata=shared-fn elapsed=" +
-                (Date.now() - started) + "ms");
-              return normalizeData(data, context);
+              var sharedInfo = normalizeData(data, context);
+              if (sharedInfo && sharedInfo.title) {
+                console.log("[KissKH] metadata=shared-fn elapsed=" +
+                  (Date.now() - started) + "ms");
+                return sharedInfo;
+              }
+              console.log("[KissKH] metadata=shared-fn-empty fallback=true");
             }
             throw new Error("shared metadata unavailable");
           })

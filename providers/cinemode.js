@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.0.1";
+var VERSION = "2.0.2";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -674,7 +674,9 @@ function capturedRows(rows, fallbackReferer) {
         url: url,
         referer: referer,
         headers: sanitiseHeaders(row.headers, referer),
-        label: row.label || "source"
+        label: row.label || "source",
+        method: row.method || row.requestMethod || "",
+        body: row.body || row.postData || row.requestBody || ""
       });
       return;
     }
@@ -690,19 +692,134 @@ function capturedRows(rows, fallbackReferer) {
   return { direct: direct, players: players, endpoints: endpoints };
 }
 
+
+function endpointMeta(url) {
+  try {
+    var u = new URL(String(url || ""));
+    var keys = [];
+    u.searchParams.forEach(function(_, k) {
+      if (keys.indexOf(k) === -1) keys.push(k);
+    });
+    return {
+      host: u.hostname,
+      path: u.pathname,
+      params: keys.join(",")
+    };
+  } catch (_) {
+    return { host: hostOf(url), path: "?", params: "" };
+  }
+}
+
+function printableKeys(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  return Object.keys(value).slice(0, 16).join(",");
+}
+
+function tryJson(text) {
+  var raw = String(text || "").trim();
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch (_) {}
+  return null;
+}
+
+function maybeB64Decode(value) {
+  var raw = String(value || "").trim();
+  if (raw.length < 20 || raw.length > 12000) return "";
+
+  var compact = raw.replace(/\s+/g, "");
+  if (!/^[A-Za-z0-9+/_=-]+$/.test(compact)) return "";
+
+  compact = compact.replace(/-/g, "+").replace(/_/g, "/");
+  while (compact.length % 4) compact += "=";
+
+  try {
+    if (typeof atob === "function") {
+      var bin = atob(compact);
+      var out = "";
+      for (var i = 0; i < bin.length; i++) {
+        var c = bin.charCodeAt(i);
+        if (c === 9 || c === 10 || c === 13 || (c >= 32 && c <= 126)) {
+          out += String.fromCharCode(c);
+        } else {
+          return "";
+        }
+      }
+      return out;
+    }
+  } catch (_) {}
+
+  try {
+    return Buffer.from(compact, "base64").toString("utf8");
+  } catch (_) {}
+
+  return "";
+}
+
+function collectNestedStrings(value, out, depth) {
+  if (depth > 5 || value == null) return;
+
+  if (typeof value === "string") {
+    out.push(value);
+
+    var nested = tryJson(value);
+    if (nested) collectNestedStrings(nested, out, depth + 1);
+
+    var decoded = maybeB64Decode(value);
+    if (decoded && decoded !== value) {
+      out.push(decoded);
+      var nested2 = tryJson(decoded);
+      if (nested2) collectNestedStrings(nested2, out, depth + 1);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.slice(0, 40).forEach(function(v) {
+      collectNestedStrings(v, out, depth + 1);
+    });
+    return;
+  }
+
+  if (typeof value === "object") {
+    Object.keys(value).slice(0, 60).forEach(function(k) {
+      collectNestedStrings(value[k], out, depth + 1);
+    });
+  }
+}
+
+function sourceCandidatesFromResponse(text, baseUrl, referer, headers) {
+  var strings = [];
+  var parsed = tryJson(text);
+
+  if (parsed) {
+    collectNestedStrings(parsed, strings, 0);
+  } else {
+    strings.push(String(text || ""));
+  }
+
+  var merged = strings.join("\n");
+  return extractMediaCandidates(merged, baseUrl, referer, headers);
+}
+
 function extractMediaCandidates(text, baseUrl, referer, headers) {
   var raw = decodeLiteral(String(text || ""));
   var out = [];
   var seen = {};
 
   function add(value) {
-    var u = absUrl(value, baseUrl);
+    var source = String(value || "").trim();
+    if (!source) return;
+
+    /*
+     * Also accept protocol-relative and relative HLS/API paths from JSON.
+     */
+    var u = absUrl(source, baseUrl);
     if (!u || seen[u] || blocked(u)) return;
     seen[u] = true;
 
     if (
       MEDIA_RE.test(u) ||
-      /m3u8|playlist|manifest|master|playback|\/hls\//i.test(u)
+      /m3u8|playlist|manifest|master|playback|\/hls\/|stream|video/i.test(u)
     ) {
       out.push({
         url: u,
@@ -715,46 +832,106 @@ function extractMediaCandidates(text, baseUrl, referer, headers) {
   }
 
   var m;
-  var abs = /https?:\\?\/\\?\/[^\s"'`<>\\]+/gi;
-  while ((m = abs.exec(raw)) !== null && out.length < 12) add(m[0]);
 
-  var props = /["'](?:url|file|src|source|playlist|manifest)["']\s*:\s*["']([^"']+)["']/gi;
-  while ((m = props.exec(raw)) !== null && out.length < 12) add(m[1]);
+  var absolute = /https?:\\?\/\\?\/[^\s"'`<>\\]+/gi;
+  while ((m = absolute.exec(raw)) !== null && out.length < 24) add(m[0]);
+
+  var protocolRelative = /["'](\/\/[^"'<>\\]+)["']/gi;
+  while ((m = protocolRelative.exec(raw)) !== null && out.length < 24) add(m[1]);
+
+  var props =
+    /["'](?:url|file|src|source|sources|stream|playlist|manifest|playback|video)["']\s*:\s*["']([^"']+)["']/gi;
+  while ((m = props.exec(raw)) !== null && out.length < 24) add(m[1]);
+
+  var relative =
+    /["'](\/[^"']*(?:m3u8|playlist|manifest|master|playback|hls|stream|video)[^"']*)["']/gi;
+  while ((m = relative.exec(raw)) !== null && out.length < 24) add(m[1]);
 
   return out;
 }
 
 function resolveCapturedEndpoints(rows) {
-  var list = (rows || []).slice(0, 4);
+  var list = (rows || []).slice(0, 6);
   if (!list.length) return Promise.resolve(null);
 
-  return Promise.all(list.map(function(row) {
+  return Promise.all(list.map(function(row, index) {
     var headers = sanitiseHeaders(row.headers, row.referer);
     delete headers.Range;
 
-    return fetchText(row.url, 1200, headers).then(function(x) {
-      var ct = "";
-      try { ct = String(x.headers.get("content-type") || "").toLowerCase(); } catch (_) {}
+    /*
+     * Preserve captured Origin if present. If WebView did not provide it,
+     * derive it from the ZXC player referer.
+     */
+    if (!headers.Origin && !headers.origin) {
+      var origin = originOf(row.referer);
+      if (origin) headers.Origin = origin;
+    }
 
-      if (/mpegurl/.test(ct) || String(x.text || "").indexOf("#EXTM3U") !== -1) {
-        return verifyDirect({
-          url: x.url || row.url,
-          referer: row.referer,
-          headers: headers,
-          label: "ZXC HLS",
-          quality: inferQuality(x.url || row.url, "")
+    var meta = endpointMeta(row.url);
+    console.log(
+      "[CineMode] endpoint#" + (index + 1) +
+      " host=" + meta.host +
+      " path=" + meta.path +
+      (meta.params ? " params=" + meta.params : "")
+    );
+
+    return timeout(
+      fetch(row.url, {
+        method: "GET",
+        headers: headers,
+        redirect: "follow"
+      }).then(function(res) {
+        var ct = "";
+        try { ct = String(res.headers.get("content-type") || "").toLowerCase(); } catch (_) {}
+
+        return res.text().then(function(text) {
+          var parsed = tryJson(text);
+
+          console.log(
+            "[CineMode] endpoint#" + (index + 1) +
+            " status=" + res.status +
+            " ct=" + (ct || "?") +
+            " bytes=" + String(text || "").length +
+            (parsed ? " keys=" + printableKeys(parsed) : "")
+          );
+
+          if (!(res.status >= 200 && res.status < 300)) return null;
+
+          /*
+           * Endpoint itself may be an extensionless HLS playlist.
+           */
+          if (/mpegurl/.test(ct) || String(text || "").indexOf("#EXTM3U") !== -1) {
+            return verifyDirect({
+              url: res.url || row.url,
+              referer: row.referer,
+              headers: headers,
+              label: "ZXC HLS",
+              quality: inferQuality(res.url || row.url, "")
+            });
+          }
+
+          var candidates = sourceCandidatesFromResponse(
+            text,
+            res.url || row.url,
+            row.referer,
+            headers
+          );
+
+          console.log(
+            "[CineMode] endpoint#" + (index + 1) +
+            " mediaCandidates=" + candidates.length
+          );
+
+          return verifyFirst(candidates, 6);
         });
-      }
-
-      var candidates = extractMediaCandidates(
-        x.text,
-        x.url || row.url,
-        row.referer,
-        headers
+      }),
+      1500,
+      "source endpoint"
+    ).catch(function(error) {
+      console.log(
+        "[CineMode] endpoint#" + (index + 1) +
+        " fail=" + (error && error.message ? error.message : String(error))
       );
-
-      return verifyFirst(candidates, 4);
-    }).catch(function() {
       return null;
     });
   })).then(function(results) {
@@ -819,7 +996,10 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
           "[CineMode] player parsed host=" + hostOf(u) +
           " direct=" + parsed.direct.length +
           " endpoints=" + parsed.endpoints.length +
-          " childPlayers=" + parsed.players.length
+          " childPlayers=" + parsed.players.length +
+          (parsed.endpoints[0] && parsed.endpoints[0].method
+            ? " method=" + parsed.endpoints[0].method
+            : "")
         );
 
         return verifyFirst(parsed.direct, 4).then(function(hit) {

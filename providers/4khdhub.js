@@ -1,5 +1,5 @@
 const PROVIDER = "4KHDHub";
-const VERSION = "1.0.1";
+const VERSION = "1.0.2";
 const BASES = ["https://4khdhub.one", "https://4khdhub.fans"];
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";

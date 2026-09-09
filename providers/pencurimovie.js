@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.1.4";
+const VERSION = "1.0.2";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -528,12 +528,6 @@ function hostOf(url) {
   return m ? m[1].toLowerCase() : "";
 }
 
-function waitMs(ms, value) {
-  return new Promise(function (resolve) {
-    setTimeout(function () { resolve(value); }, ms);
-  });
-}
-
 function decodeHtmlEntities(value) {
   return String(value || "")
     .replace(/&amp;/g, "&")
@@ -641,58 +635,26 @@ function resolveDood(url, referer) {
   }).then(function (response) {
     var finalEmbedUrl = response.url || embedUrl;
     var host = originOf(finalEmbedUrl);
-    var html = String(response.text || "");
-    var passMatch = html.match(/\/pass_md5\/[^'"\s<]+/i);
+    var passMatch = response.text.match(/\/pass_md5\/[^'"\s<]+/i);
     if (!passMatch) return [];
-
     var passUrl = /^https?:\/\//i.test(passMatch[0]) ? passMatch[0] : host + passMatch[0];
-
-    // Dood/DSV uses the player token from the embed page. Older builds used
-    // the last pass_md5 path segment, which can produce a URL that probes once
-    // but later fails in the native player.
-    var tokenMatch = html.match(/[?&]token=([a-z0-9]+)(?:[&'"]|$)/i);
-    var token = tokenMatch && tokenMatch[1]
-      ? tokenMatch[1]
-      : passUrl.substring(passUrl.lastIndexOf("/") + 1);
+    var token = passUrl.substring(passUrl.lastIndexOf("/") + 1);
     if (!token) return [];
 
     return fetchText(passUrl, {
-      headers: {
-        "Accept": "*/*",
-        "Referer": finalEmbedUrl,
-        "User-Agent": USER_AGENT
-      }
+      headers: { "Accept": "*/*", "Referer": finalEmbedUrl, "User-Agent": USER_AGENT }
     }).then(function (prefix) {
       var base = String(prefix || "").trim();
       if (!/^https?:\/\//i.test(base)) return [];
-
-      // Required Dood signature format:
-      // {pass response}{random10}?token={token}&expiry={unix ms}
-      var finalUrl = base + randomToken(10) +
-        "?token=" + encodeURIComponent(token) +
-        "&expiry=" + String(Date.now());
-
-      console.log("[PencuriMovie] DSV signed direct host=" + hostOf(finalUrl) +
-        " tokenSource=" + (tokenMatch ? "embed" : "pass"));
-
+      var finalUrl = base + randomToken(10) + "?token=" + encodeURIComponent(token);
       return [{
         url: finalUrl,
-        // The exact embed URL is required by Dood-style CDNs. Do not replace
-        // it with only the origin/root when handing the stream to VUEO.
-        referer: finalEmbedUrl,
-        label: "DSV",
-        headers: {
-          "Accept": "*/*",
-          "Referer": finalEmbedUrl,
-          "User-Agent": USER_AGENT
-        }
+        referer: host + "/",
+        label: "Dood",
+        headers: { "Accept": "*/*", "Referer": host + "/", "User-Agent": USER_AGENT }
       }];
     });
-  }).catch(function (error) {
-    console.log("[PencuriMovie] DSV resolve failed=" +
-      (error && error.message ? error.message : String(error)));
-    return [];
-  });
+  }).catch(function () { return []; });
 }
 
 function resolveMixDrop(url, referer) {
@@ -925,12 +887,16 @@ function resolveGeneric(url, referer, depth) {
 }
 
 function mirrorPriority(mirror) {
-  var host = hostOf(mirror && mirror.url);
-  if (/dsvplay\.com$/i.test(host)) return 0;
-  if (/playmogo\.com$/i.test(host)) return 1;
-  if (/voe\./i.test(host)) return 2;
-  if (/streamtape\.com$/i.test(host)) return 3;
-  return 9;
+  var value = (String(mirror && mirror.label || "") + " " + String(mirror && mirror.url || "")).toLowerCase();
+  if (isLikelyStreamUrl(mirror.url)) return 0;
+  if (/playmate|playm/.test(value)) return 1;
+  if (/streamwish|hglink|wish|filelion|vidhide|filemoon/.test(value)) return 2;
+  if (/voe/.test(value)) return 3;
+  if (/mixdrop|mxdrop/.test(value)) return 4;
+  if (/dsvplay|dood/.test(value)) return 5;
+  if (/streamtape|stape/.test(value)) return 6;
+  if (/abyss|playhydrax/.test(value)) return 7;
+  return 10;
 }
 
 function resolveMirror(mirror, pageUrl, depth) {
@@ -1067,136 +1033,6 @@ function probeDoodStream(stream) {
   });
 }
 
-function verifyFastStream(stream) {
-  var url = String(stream && stream.url || "").trim();
-  if (!url) return Promise.resolve(null);
-
-  var headers = {};
-  var supplied = stream.headers || {};
-  Object.keys(supplied).forEach(function (key) { headers[key] = supplied[key]; });
-  if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
-  if (!headers["Accept"]) headers["Accept"] = "*/*";
-  if (!stream.noReferer && !headers["Referer"] && !headers["referer"]) {
-    headers["Referer"] = stream.referer || originOf(url) + "/";
-  }
-  headers["Range"] = "bytes=0-2047";
-
-  var probe = fetch(url, {
-    method: "GET",
-    headers: headers
-  }).then(function (res) {
-    var status = res ? Number(res.status || 0) : 0;
-    var contentType = "";
-    try {
-      if (res && res.headers && res.headers.get) {
-        contentType = String(res.headers.get("content-type") || "").toLowerCase();
-      }
-    } catch (_) {}
-
-    if (status !== 200 && status !== 206) return null;
-    if (/text\/html|application\/json|text\/plain/.test(contentType)) return null;
-
-    if (/mpegurl|video\//.test(contentType)) {
-      console.log("[PencuriMovie] VERIFIED host=" + hostOf(url) +
-        " status=" + status + " type='" + contentType + "'");
-      return stream;
-    }
-
-    if (!res || typeof res.arrayBuffer !== "function") {
-      return stream;
-    }
-
-    return res.arrayBuffer().then(function (buffer) {
-      var bytes = new Uint8Array(buffer || new ArrayBuffer(0));
-      var limit = Math.min(bytes.length, 256);
-      var ascii = "";
-      for (var i = 0; i < limit; i++) {
-        var c = bytes[i];
-        ascii += c >= 32 && c <= 126 ? String.fromCharCode(c) : ".";
-      }
-
-      var looksMedia =
-        ascii.indexOf("#EXTM3U") >= 0 ||
-        ascii.indexOf("ftyp") >= 0 ||
-        /\.(?:m3u8|mp4|m4v|mkv|webm)(?:[?#]|$)/i.test(url);
-
-      if (!looksMedia) return null;
-
-      console.log("[PencuriMovie] VERIFIED host=" + hostOf(url) +
-        " status=" + status + " type='" + contentType + "'");
-      return stream;
-    }).catch(function () {
-      return /\.(?:m3u8|mp4|m4v|mkv|webm)(?:[?#]|$)/i.test(url) ? stream : null;
-    });
-  }).catch(function () {
-    return null;
-  });
-
-  return Promise.race([
-    probe,
-    waitMs(2200, null)
-  ]);
-}
-
-function verifyFirstFast(streams) {
-  var list = (streams || []).slice(0, 3);
-  var index = 0;
-
-  function next() {
-    if (index >= list.length) return Promise.resolve(null);
-    var stream = list[index++];
-    return verifyFastStream(stream).then(function (verified) {
-      return verified || next();
-    });
-  }
-
-  return next();
-}
-
-function firstVerifiedMirror(tasks, maxWaitMs) {
-  return new Promise(function (resolve) {
-    if (!tasks.length) return resolve([]);
-    var finished = false;
-    var pending = tasks.length;
-
-    var timer = setTimeout(function () {
-      if (finished) return;
-      finished = true;
-      resolve([]);
-    }, maxWaitMs);
-
-    tasks.forEach(function (task) {
-      Promise.resolve(task).then(function (group) {
-        if (finished) return;
-        return verifyFirstFast(group || []).then(function (stream) {
-          if (finished) return;
-          if (stream) {
-            finished = true;
-            clearTimeout(timer);
-            resolve([stream]);
-            return;
-          }
-
-          pending--;
-          if (pending <= 0) {
-            finished = true;
-            clearTimeout(timer);
-            resolve([]);
-          }
-        });
-      }).catch(function () {
-        if (finished) return;
-        pending--;
-        if (pending <= 0) {
-          finished = true;
-          clearTimeout(timer);
-          resolve([]);
-        }
-      });
-    });
-  });
-}
-
 function filterDeadDoodStreams(streams) {
   var list = streams || [];
   var doodIndexes = [];
@@ -1269,9 +1105,7 @@ function formatStreams(streams) {
     if (!headers["Accept"]) headers["Accept"] = "*/*";
 
     if (!stream.noReferer) {
-      headers["Referer"] = headers["Referer"] || headers["referer"] ||
-        stream.referer || originOf(url) + "/";
-      delete headers["referer"];
+      headers["Referer"] = stream.referer || headers["Referer"] || originOf(url) + "/";
     } else {
       delete headers["Referer"];
       delete headers["referer"];
@@ -1299,72 +1133,21 @@ function resolveMirrors(mirrors, pageUrl) {
     return hostOf(x.url) + "[" + String(x.label || "") + "]";
   }).join(" | "));
 
-  if (!selected.length) return Promise.resolve([]);
-
-  // DSV is the proven working path. Resolve it alone first so VUEO does not
-  // keep waiting on background PlayMogo/VOE/StreamTape requests after the
-  // provider already has a playable source.
-  var dsv = null;
-  for (var i = 0; i < selected.length; i++) {
-    if (/dsvplay\.com$/i.test(hostOf(selected[i].url))) {
-      dsv = selected[i];
-      break;
-    }
-  }
-
-  function resolveOne(mirror, waitMsValue) {
-    if (!mirror) return Promise.resolve([]);
-    return firstVerifiedMirror([
-      resolveMirror(mirror, pageUrl, 0).catch(function () { return []; })
-    ], waitMsValue);
-  }
-
-  // DSV has already completed a live embed + pass_md5 exchange before it
-  // produces the signed CDN URL. Return that fresh signed URL immediately.
-  // A second CDN range verification only adds latency and can consume part of
-  // the short-lived signature window before VUEO starts playback.
-  var dsvTask = dsv
-    ? resolveMirror(dsv, pageUrl, 0).catch(function () { return []; })
-    : Promise.resolve([]);
-
-  return Promise.race([
-    dsvTask,
-    waitMs(4200, [])
-  ]).then(function (ready) {
-    ready = ready || [];
-    if (ready.length && ready[0] && ready[0].url) {
-      console.log("[PencuriMovie] DSV-fast ready host=" + hostOf(ready[0].url) +
-        " verify=skipped");
-      return [ready[0]];
-    }
-
-    // Only start other hosts when DSV really fails.
-    var fallbackMirrors = selected.filter(function (mirror) {
-      return !dsv || mirror.url !== dsv.url;
-    }).slice(0, 3);
-
-    console.log("[PencuriMovie] DSV-fast failed, fallback=" +
-      fallbackMirrors.map(function (x) { return hostOf(x.url); }).join("|"));
-
-    var tasks = fallbackMirrors.map(function (mirror) {
-      return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
-    });
-
-    return firstVerifiedMirror(tasks, 2300).then(function (fallbackReady) {
-      if (fallbackReady.length) {
-        console.log("[PencuriMovie] fallback ready host=" + hostOf(fallbackReady[0].url));
-      }
-      return fallbackReady;
-    });
+  return Promise.all(selected.map(function (mirror) {
+    return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
+  })).then(function (groups) {
+    var flat = [];
+    groups.forEach(function (group) { flat = flat.concat(group || []); });
+    return flat;
   });
 }
+
 function getStreams(tmdbId, mediaType, season, episode) {
-  var startedAt = Date.now();
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
   episode = Number(episode || 1);
 
-  console.log("[PencuriMovie] v" + VERSION + " TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : "") + " fastFirst=true");
+  console.log("[PencuriMovie] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : ""));
   console.log("[PencuriMovie] base=" + BASE);
 
   return getTmdbDetails(tmdbId, mediaType)
@@ -1384,10 +1167,11 @@ function getStreams(tmdbId, mediaType, season, episode) {
       return resolveMirrors(mirrors, playback.url);
     })
     .then(function (resolved) {
+      return filterDeadDoodStreams(resolved || []);
+    })
+    .then(function (resolved) {
       var streams = formatStreams(resolved || []);
-      console.log("[PencuriMovie] v" + VERSION +
-        " playable sources=" + streams.length +
-        " elapsed=" + (Date.now() - startedAt) + "ms");
+      console.log("[PencuriMovie] v" + VERSION + " playable sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

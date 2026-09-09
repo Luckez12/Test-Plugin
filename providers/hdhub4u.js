@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "HDHub4u";
-var VERSION = "1.1.0";
+var VERSION = "1.1.1";
 var PRIMARY_BASE = "https://new5.hdhub4u.cl";
 var FALLBACK_BASES = ["https://hdhub4u.frl"];
 var DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
@@ -13,6 +13,9 @@ var PROVIDER_BUDGET_MS = 8800;
 var VERIFY_TIMEOUT_MS = 1350;
 var SEEK_VERIFY_TIMEOUT_MS = 1450;
 var SEEK_PROBE_OFFSET = 1048576;
+var MULTI_TASK_TIMEOUT_MS = 3000;
+var MULTI_FIRST_GRACE_MS = 1400;
+var MULTI_ABSOLUTE_MS = 3400;
 
 function cheerio() { return require("cheerio-without-node-native"); }
 
@@ -412,7 +415,7 @@ function qualityNumber(text) {
 }
 
 function qualityLabel(q) {
-  if (q >= 2160) return "2160p";
+  if (q >= 2160) return "4K";
   if (q >= 1440) return "1440p";
   if (q >= 1080) return "1080p";
   if (q >= 720) return "720p";
@@ -754,7 +757,60 @@ function normalizeEscapedUrl(value) {
   return s;
 }
 
-function verifyHls(url, referer, extraHeaders) {
+function parseHlsVariants(body, playlistUrl, referer, headers, fallbackQuality) {
+  var lines = String(body || "").replace(/\r/g, "").split("\n");
+  var variants = [];
+  var seen = Object.create(null);
+
+  for (var i = 0; i < lines.length; i++) {
+    var line = String(lines[i] || "").trim();
+    if (!/^#EXT-X-STREAM-INF:/i.test(line)) continue;
+
+    var attrs = line.substring(line.indexOf(":") + 1);
+    var rm = attrs.match(/\bRESOLUTION\s*=\s*(\d+)x(\d+)/i);
+    var bm = attrs.match(/\bBANDWIDTH\s*=\s*(\d+)/i);
+    var q = rm ? Number(rm[2]) : 0;
+
+    var j = i + 1;
+    while (j < lines.length && (!String(lines[j] || "").trim() || /^#/.test(String(lines[j] || "").trim()))) j++;
+    if (j >= lines.length) continue;
+
+    var child = normalizeEscapedUrl(String(lines[j] || "").trim());
+    if (/^\/\//.test(child)) child = "https:" + child;
+    child = absoluteUrl(playlistUrl, child);
+    if (!/^https?:\/\//i.test(child) || seen[child]) continue;
+    seen[child] = true;
+
+    variants.push({
+      url: child,
+      referer: referer || "",
+      headers: headers || {},
+      isHls: true,
+      quality: q || Number(fallbackQuality || 0),
+      bandwidth: bm ? Number(bm[1]) : 0
+    });
+  }
+
+  if (!variants.length) {
+    return [{
+      url: playlistUrl,
+      referer: referer || "",
+      headers: headers || {},
+      isHls: true,
+      quality: Number(fallbackQuality || 0) || 1080,
+      bandwidth: 0
+    }];
+  }
+
+  variants.sort(function(a, b) {
+    if (b.quality !== a.quality) return b.quality - a.quality;
+    return b.bandwidth - a.bandwidth;
+  });
+
+  return variants;
+}
+
+function verifyHls(url, referer, extraHeaders, fallbackQuality) {
   url = normalizeEscapedUrl(url);
   if (!/^https?:\/\//i.test(url)) return Promise.resolve(null);
 
@@ -772,14 +828,19 @@ function verifyHls(url, referer, extraHeaders) {
       console.log("[HDHub4u] HLS reject host=" + hostOf(finalUrl) + " ct=" + (ct || "?"));
       return null;
     }
-    console.log("[HDHub4u] HLS verified host=" + hostOf(finalUrl));
-    return {
-      url: finalUrl,
-      referer: referer || "",
-      headers: headers,
-      isHls: true,
-      quality: 1080
-    };
+
+    var variants = parseHlsVariants(body, finalUrl, referer, headers, fallbackQuality);
+    var qualities = variants.map(function(v) { return qualityLabel(v.quality); }).join(",");
+
+    console.log(
+      "[HDHub4u] HLS verified host=" + hostOf(finalUrl) +
+      " variants=" + variants.length +
+      " q=" + qualities
+    );
+
+    var best = variants[0];
+    best.variants = variants;
+    return best;
   }).catch(function() {
     return null;
   });
@@ -904,8 +965,15 @@ function resolveHdstream4u(url, referer) {
         "Sec-Fetch-Site": "cross-site"
       }).then(function(hit) {
         if (hit) {
+          var pageQ = qualityNumber(raw) || 1080;
           hit.label = "WATCH";
-          hit.quality = 1080;
+          if (!hit.quality) hit.quality = pageQ;
+          if (Array.isArray(hit.variants)) {
+            hit.variants.forEach(function(v) {
+              v.label = "WATCH";
+              if (!v.quality) v.quality = pageQ;
+            });
+          }
           return hit;
         }
         return next(i + 1);
@@ -981,7 +1049,13 @@ function resolveHubstream(url, referer) {
           }).then(function(hit) {
             if (hit) {
               hit.label = "PLAYER-2";
-              hit.quality = 1080;
+              if (!hit.quality) hit.quality = 1080;
+              if (Array.isArray(hit.variants)) {
+                hit.variants.forEach(function(v) {
+                  v.label = "PLAYER-2";
+                  if (!v.quality) v.quality = 1080;
+                });
+              }
               return hit;
             }
             return verifyAt(j + 1);
@@ -1099,7 +1173,13 @@ function resolveHubCdn(url, referer) {
     return verifyHls(direct, url, { "Referer": url }).then(function(hit) {
       if (!hit) return null;
       hit.label = "HubCDN";
-      hit.quality = 480;
+      if (!hit.quality) hit.quality = 480;
+      if (Array.isArray(hit.variants)) {
+        hit.variants.forEach(function(v) {
+          v.label = "HubCDN";
+          if (!v.quality) v.quality = 480;
+        });
+      }
       return hit;
     });
   }).catch(function() { return null; });
@@ -1329,28 +1409,169 @@ function resolveTvQualityRedirect(block, detailUrl, episode) {
   }).catch(function() { return null; });
 }
 
+function expandResolvedHit(hit, fallbackQuality) {
+  if (!hit) return [];
+  var rows = Array.isArray(hit.variants) && hit.variants.length ? hit.variants.slice() : [hit];
+  return rows.map(function(row) {
+    var out = {};
+    Object.keys(row || {}).forEach(function(k) { out[k] = row[k]; });
+    if (!out.quality) out.quality = Number(fallbackQuality || hit.quality || 0);
+    if (!out.label) out.label = hit.label || "";
+    if (!out.referer) out.referer = hit.referer || "";
+    if (!out.headers) out.headers = hit.headers || {};
+    if (typeof out.isHls !== "boolean") out.isHls = !!hit.isHls;
+    return out;
+  });
+}
+
+function preferredMovieBlock(blocks, quality) {
+  var rows = (blocks || []).filter(function(b) {
+    return Number(b.quality || 0) === Number(quality);
+  });
+
+  rows.sort(function(a, b) {
+    function score(x) {
+      var t = String(x.text || "").toLowerCase();
+      var s = 0;
+      if (/x264|h264|avc/.test(t)) s += 80;
+      if (/web-dl/.test(t)) s += 40;
+      if (/10bit|hevc|x265|h265/.test(t)) s -= 10;
+      if (/6\.8gb|remux/.test(t)) s -= 20;
+      return s;
+    }
+    return score(b) - score(a);
+  });
+
+  return rows[0] || null;
+}
+
+function dedupeMovieHits(hits) {
+  var target = [2160, 1080, 720];
+  var byQuality = Object.create(null);
+
+  (hits || []).forEach(function(hit) {
+    if (!hit || !hit.url) return;
+
+    var q = Number(hit.quality || 0);
+    if (q >= 2000) q = 2160;
+    else if (q >= 1000) q = 1080;
+    else if (q >= 650) q = 720;
+    else return;
+
+    hit.quality = q;
+
+    var old = byQuality[q];
+    if (!old) {
+      byQuality[q] = hit;
+      return;
+    }
+
+    /* Prefer HLS, then a non-weak direct source. */
+    var oldScore = (old.isHls ? 100 : 0) + (!old.weakSeek ? 10 : 0);
+    var newScore = (hit.isHls ? 100 : 0) + (!hit.weakSeek ? 10 : 0);
+    if (newScore > oldScore) byQuality[q] = hit;
+  });
+
+  return target.map(function(q) { return byQuality[q]; }).filter(Boolean);
+}
+
 function resolveMoviePage(html, detailUrl) {
-  var links = siteStreamLinks(html, detailUrl);
+  var streamLinks = siteStreamLinks(html, detailUrl).slice(0, 2);
+  var blocks = movieBlocks(html, detailUrl);
+  var targets = [2160, 1080, 720];
+  var tasks = [];
 
-  function next(i) {
-    if (i >= links.length || i >= 5) return Promise.resolve(null);
-    var item = links[i];
-    console.log(
-      "[HDHub4u] stream try kind=" + item.kind +
-      " host=" + hostOf(item.url)
-    );
-    return resolveSiteStream(item, detailUrl).then(function(hit) {
-      if (hit) {
-        hit.quality = hit.quality || item.quality || 1080;
-        return hit;
-      }
-      return next(i + 1);
-    }).catch(function() {
-      return next(i + 1);
+  /*
+   * WATCH / PLAYER-2 are resolved in parallel. If their master playlist
+   * already exposes multiple renditions, all variants are returned from
+   * the same fast HLS request.
+   */
+  streamLinks.forEach(function(item) {
+    tasks.push(function() {
+      return resolveSiteStream(item, detailUrl).then(function(hit) {
+        return expandResolvedHit(hit, item.quality || 1080);
+      });
     });
-  }
+  });
 
-  return next(0);
+  /*
+   * Website quality buttons are also resolved in parallel so 4K/1080/720
+   * do not block each other. HLS remains preferred, verified direct mirrors
+   * are kept as fallback for qualities the WATCH player does not expose.
+   */
+  targets.forEach(function(q) {
+    var block = preferredMovieBlock(blocks, q);
+    if (!block) return;
+
+    tasks.push(function() {
+      console.log(
+        "[HDHub4u] quality-task q=" + qualityLabel(q) +
+        " host=" + hostOf(block.url)
+      );
+      return resolveServer(block.url, detailUrl).then(function(hit) {
+        if (!hit) return [];
+        hit.quality = q;
+        return expandResolvedHit(hit, q);
+      });
+    });
+  });
+
+  console.log(
+    "[HDHub4u] multi-quality tasks=" + tasks.length +
+    " targets=4K,1080p,720p"
+  );
+
+  if (!tasks.length) return Promise.resolve([]);
+
+  var ready = [];
+  var pending = tasks.length;
+  var firstDone = false;
+  var firstResolve;
+  var allResolve;
+
+  var firstGood = new Promise(function(resolve) { firstResolve = resolve; });
+  var allDone = new Promise(function(resolve) { allResolve = resolve; });
+
+  tasks.forEach(function(run) {
+    withTimeout(
+      Promise.resolve().then(run),
+      MULTI_TASK_TIMEOUT_MS,
+      "quality-task"
+    ).then(function(rows) {
+      rows = Array.isArray(rows) ? rows : [];
+      if (rows.length) {
+        ready.push.apply(ready, rows);
+        if (!firstDone) {
+          firstDone = true;
+          firstResolve(true);
+        }
+      }
+    }).catch(function() {
+      /* A slow quality must not hold back the other qualities. */
+    }).then(function() {
+      pending--;
+      if (pending <= 0) allResolve(true);
+    });
+  });
+
+  var graceAfterFirst = firstGood.then(function() {
+    return new Promise(function(resolve) {
+      setTimeout(resolve, MULTI_FIRST_GRACE_MS);
+    });
+  });
+
+  var absolute = new Promise(function(resolve) {
+    setTimeout(resolve, MULTI_ABSOLUTE_MS);
+  });
+
+  return Promise.race([allDone, graceAfterFirst, absolute]).then(function() {
+    var finalHits = dedupeMovieHits(ready);
+    console.log(
+      "[HDHub4u] multi-quality ready=" +
+      finalHits.map(function(x) { return qualityLabel(x.quality) + ":" + (x.isHls ? "hls" : "direct"); }).join(",")
+    );
+    return finalHits;
+  });
 }
 
 function resolveTvPage(html, detailUrl, episode) {
@@ -1429,20 +1650,31 @@ function getStreams(tmdbId, mediaType, season, episode) {
       if (type === "movie") return resolveMoviePage(page.text, page.url);
       return resolveTvPage(page.text, page.url, e);
     });
-  }).then(function(hit) {
-    if (!hit || !hit.url || !hit.isHls) {
-      if (hit && hit.url && !hit.isHls) {
-        console.log("[HDHub4u] reject progressive playback host=" + hostOf(hit.url));
-      }
-      return [];
-    }
-    console.log(
-      "[HDHub4u] FAST HLS HIT host=" + hostOf(hit.url) +
-      " q=" + qualityLabel(hit.quality) +
-      " source=" + (hit.label || "?") +
-      " elapsed=" + (Date.now() - started) + "ms"
-    );
-    return [toStream(hit, info, type, s, e)];
+  }).then(function(result) {
+    var hits = type === "movie"
+      ? (Array.isArray(result) ? result : (result ? [result] : []))
+      : (result ? [result] : []);
+
+    if (!hits.length) return [];
+
+    var streams = hits.filter(function(hit) {
+      return hit && hit.url;
+    }).map(function(hit) {
+      console.log(
+        "[HDHub4u] READY host=" + hostOf(hit.url) +
+        " q=" + qualityLabel(hit.quality) +
+        " mode=" + (hit.isHls ? "hls" : "direct") +
+        " source=" + (hit.label || "?") +
+        " elapsed=" + (Date.now() - started) + "ms"
+      );
+      return toStream(hit, info, type, s, e);
+    });
+
+    streams.sort(function(a, b) {
+      return qualityNumber(b.quality) - qualityNumber(a.quality);
+    });
+
+    return streams;
   });
 
   return withTimeout(work, PROVIDER_BUDGET_MS, "HDHub4u provider").then(function(streams) {

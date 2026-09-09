@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.1.1";
+const VERSION = "1.1.2";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 var CryptoJS = null;
@@ -838,15 +838,38 @@ function verifyFastDirectCandidate(item, mediaType, index) {
 
 var fastVerifyCache = {};
 
+function candidateFingerprint(item) {
+  var url = String(item && item.resourceLink || "");
+  var q = Number(item && (item.resolution || item._requestedResolution) || 0);
+  var size = candidateSize(item);
+  var duration = candidateDuration(item);
+  var host = hostOf(url);
+  var rid = String(item && item.resourceId || "").trim();
+
+  // MovieBox frequently returns the same underlying file with a different
+  // signed URL/resourceId for 2160/1080/720 requests. The stable media
+  // metadata is a better de-duplication key than the signed URL.
+  return [
+    q,
+    size,
+    duration,
+    host,
+    rid && !size && !duration ? rid : ""
+  ].join("|");
+}
+
 function verifyCachedCandidate(item, mediaType, index) {
   var url = String(item && item.resourceLink || "");
   if (!url) return Promise.resolve(null);
-  if (!fastVerifyCache[url]) {
-    fastVerifyCache[url] = verifyFastDirectCandidate(item, mediaType, index);
+  var key = candidateFingerprint(item);
+  if (!fastVerifyCache[key]) {
+    fastVerifyCache[key] = verifyFastDirectCandidate(item, mediaType, index);
   } else {
-    console.log("[MovieBox] reuse verified CDN host=" + hostOf(url));
+    console.log("[MovieBox] reuse media fingerprint q=" +
+      qualityName(Number(item.resolution || item._requestedResolution || 0)) +
+      " host=" + hostOf(url));
   }
-  return fastVerifyCache[url];
+  return fastVerifyCache[key];
 }
 
 function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
@@ -857,7 +880,14 @@ function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
       return directCandidateScore(b) - directCandidateScore(a);
     }).slice(0, 2);
 
-    console.log("[MovieBox] quality " + qualityName(resolution) + " candidates=" + candidates.length);
+    var actualQualities = [];
+    candidates.forEach(function (item) {
+      var q = qualityName(Number(item.resolution || item._requestedResolution || 0));
+      if (actualQualities.indexOf(q) < 0) actualQualities.push(q);
+    });
+    console.log("[MovieBox] request " + qualityName(resolution) +
+      " candidates=" + candidates.length +
+      " actual=" + (actualQualities.length ? actualQualities.join(",") : "none"));
     if (!candidates.length) return null;
 
     function tryCandidate(i) {
@@ -913,7 +943,7 @@ function multiQualityFastDirect(subjectId, mediaType, season, episode) {
   var tasks = resolutions.map(function (resolution) {
     return Promise.race([
       resolveFastQuality(subjectId, mediaType, season, episode, resolution),
-      waitMs(3600, null)
+      waitMs(3000, null)
     ]).then(function (stream) {
       addStream(stream);
       return stream;
@@ -927,14 +957,14 @@ function multiQualityFastDirect(subjectId, mediaType, season, episode) {
   var firstWindow = firstReady.then(function () {
     return Promise.race([
       allDone,
-      waitMs(1200, null)
+      waitMs(450, null)
     ]).then(function () { return ready.slice(); });
   });
 
   return Promise.race([
     allDone.then(function () { return ready.slice(); }),
     firstWindow,
-    waitMs(4400, null).then(function () { return ready.slice(); })
+    waitMs(3600, null).then(function () { return ready.slice(); })
   ]).then(function (streams) {
     streams = streams || [];
     if (streams.length) {
@@ -957,6 +987,7 @@ function multiQualityFastDirect(subjectId, mediaType, season, episode) {
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
+  var startedAt = Date.now();
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
   episode = Number(episode || 1);
@@ -982,7 +1013,9 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (streams) {
       streams = streams || [];
-      console.log("[MovieBox] v" + VERSION + " playable sources=" + streams.length);
+      console.log("[MovieBox] v" + VERSION +
+        " playable sources=" + streams.length +
+        " elapsed=" + (Date.now() - startedAt) + "ms");
       return streams;
     })
     .catch(function (error) {

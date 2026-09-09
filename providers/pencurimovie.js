@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.1.3";
+const VERSION = "1.1.4";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -1319,10 +1319,23 @@ function resolveMirrors(mirrors, pageUrl) {
     ], waitMsValue);
   }
 
-  return resolveOne(dsv, 4600).then(function (ready) {
-    if (ready.length) {
-      console.log("[PencuriMovie] DSV-first ready host=" + hostOf(ready[0].url));
-      return ready;
+  // DSV has already completed a live embed + pass_md5 exchange before it
+  // produces the signed CDN URL. Return that fresh signed URL immediately.
+  // A second CDN range verification only adds latency and can consume part of
+  // the short-lived signature window before VUEO starts playback.
+  var dsvTask = dsv
+    ? resolveMirror(dsv, pageUrl, 0).catch(function () { return []; })
+    : Promise.resolve([]);
+
+  return Promise.race([
+    dsvTask,
+    waitMs(4200, [])
+  ]).then(function (ready) {
+    ready = ready || [];
+    if (ready.length && ready[0] && ready[0].url) {
+      console.log("[PencuriMovie] DSV-fast ready host=" + hostOf(ready[0].url) +
+        " verify=skipped");
+      return [ready[0]];
     }
 
     // Only start other hosts when DSV really fails.
@@ -1330,7 +1343,7 @@ function resolveMirrors(mirrors, pageUrl) {
       return !dsv || mirror.url !== dsv.url;
     }).slice(0, 3);
 
-    console.log("[PencuriMovie] DSV-first failed, fallback=" +
+    console.log("[PencuriMovie] DSV-fast failed, fallback=" +
       fallbackMirrors.map(function (x) { return hostOf(x.url); }).join("|"));
 
     var tasks = fallbackMirrors.map(function (mirror) {

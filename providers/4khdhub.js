@@ -1,9 +1,12 @@
 const PROVIDER = "4KHDHub";
-const VERSION = "1.0.2";
+const VERSION = "1.1.0";
 const BASES = ["https://4khdhub.one", "https://4khdhub.fans"];
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 const UA = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
+const MULTI_FIRST_GRACE_MS = 1800;
+const MULTI_ABSOLUTE_MS = 5200;
+const QUALITY_TASK_LIMIT = 2;
 
 function cheerio() { return require("cheerio-without-node-native"); }
 
@@ -60,6 +63,10 @@ function parseYear(v) {
 function qualityFromText(v) {
   var m = String(v || "").match(/\b(2160|1080|720|480|360)p\b/i);
   return m ? m[1] + "p" : "Auto";
+}
+function displayQuality(q) {
+  q = String(q || "Auto");
+  return q === "2160p" ? "4K" : q;
 }
 function mediaLike(url) {
   var clean = String(url || "").split("?")[0].toLowerCase();
@@ -249,16 +256,29 @@ function parseTvBlocks(html, detailUrl, season, episode) {
   }
   return blocks;
 }
-function blockScore(b) {
+function blockScore(b, targetQuality) {
   var t = String(b.text || "").toLowerCase();
-  var q = b.quality;
-  var score = q === "1080p" ? 500 : q === "2160p" ? 450 : q === "720p" ? 350 : 200;
-  if (/h264|x264|avc/.test(t)) score += 140;
+  var q = String(b.quality || "Auto");
+  var score = 0;
+
+  if (targetQuality && q === targetQuality) score += 1000;
+  if (/web-dl/.test(t)) score += 100;
   if (/sdr/.test(t)) score += 70;
-  if (/h265|hevc/.test(t)) score -= 20;
-  if (/dv|dolby vision/.test(t)) score -= 50;
+  if (/av1/.test(t)) score -= 80;
+  if (/dv|dolby vision/.test(t)) score -= 35;
+  if (/hdr/.test(t) && !/sdr/.test(t)) score -= 10;
+
+  if (q === "2160p") {
+    if (/h265|hevc|x265/.test(t)) score += 90;
+    if (/h264|x264|avc/.test(t)) score += 35;
+  } else {
+    if (/h264|x264|avc/.test(t)) score += 120;
+    if (/h265|hevc|x265/.test(t)) score += 35;
+  }
+
   return score;
 }
+
 function serverScore(url) {
   var u = String(url || "").toLowerCase();
   if (/hubcloud/.test(u)) return 100;
@@ -525,38 +545,158 @@ function resolveCandidates(links, referer) {
   return next(0);
 }
 
-function resolveBlocks(blocks, detailUrl) {
-  blocks = (blocks || []).slice().sort(function (a, b) { return blockScore(b) - blockScore(a); });
-  console.log("[4KHDHub] blocks=" + blocks.length + " order=" + blocks.slice(0, 5).map(function (b) { return b.quality; }).join(","));
+function buildStream(result, quality, detailUrl) {
+  return {
+    name: PROVIDER,
+    title: "4KHDHub • " + displayQuality(quality) + " • " + (result.label || hostOf(result.url)),
+    url: result.url,
+    quality: displayQuality(quality),
+    headers: {
+      "User-Agent": UA,
+      "Accept": "*/*",
+      "Referer": result.referer || detailUrl
+    }
+  };
+}
+
+function resolveOneQuality(blocks, targetQuality, detailUrl) {
+  var matches = (blocks || []).filter(function (b) {
+    return String(b.quality || "") === targetQuality;
+  }).sort(function (a, b) {
+    return blockScore(b, targetQuality) - blockScore(a, targetQuality);
+  }).slice(0, QUALITY_TASK_LIMIT);
+
+  if (!matches.length) {
+    console.log("[4KHDHub] quality " + displayQuality(targetQuality) + " unavailable");
+    return Promise.resolve(null);
+  }
+
+  console.log(
+    "[4KHDHub] quality " + displayQuality(targetQuality) +
+    " candidates=" + matches.length
+  );
+
   function tryBlock(i) {
-    if (i >= blocks.length || i >= 5) return Promise.resolve([]);
-    var b = blocks[i];
-    var links = b.links.slice().sort(function (a, c) { return serverScore(c) - serverScore(a); });
-    console.log("[4KHDHub] try block=" + b.quality + " servers=" + links.map(hostOf).join("|"));
+    if (i >= matches.length) return Promise.resolve(null);
+    var b = matches[i];
+    var links = b.links.slice().sort(function (a, c) {
+      return serverScore(c) - serverScore(a);
+    });
+
+    console.log(
+      "[4KHDHub] try quality=" + displayQuality(targetQuality) +
+      " block=" + (i + 1) +
+      " servers=" + links.map(hostOf).join("|")
+    );
+
     return resolveCandidates(links, detailUrl).then(function (r) {
       if (!r || !r.url) return tryBlock(i + 1);
-      console.log("[4KHDHub] selected host=" + hostOf(r.url) + " label='" + (r.label || "Direct") + "' quality=" + b.quality + " verified=true");
-      return [{
-        name: PROVIDER,
-        title: "4KHDHub • " + b.quality + " • " + (r.label || hostOf(r.url)),
-        url: r.url,
-        quality: b.quality,
-        headers: {
-          "User-Agent": UA,
-          "Accept": "*/*",
-          "Referer": r.referer || detailUrl
-        }
-      }];
+
+      console.log(
+        "[4KHDHub] READY host=" + hostOf(r.url) +
+        " q=" + displayQuality(targetQuality) +
+        " label='" + (r.label || "Direct") + "'"
+      );
+
+      return buildStream(r, targetQuality, detailUrl);
+    }).catch(function () {
+      return tryBlock(i + 1);
     });
   }
+
   return tryBlock(0);
+}
+
+function resolveBlocks(blocks, detailUrl) {
+  var targets = ["2160p", "1080p", "720p"];
+  var available = targets.filter(function (q) {
+    return (blocks || []).some(function (b) { return b.quality === q; });
+  });
+
+  console.log(
+    "[4KHDHub] blocks=" + (blocks || []).length +
+    " available=" + available.map(displayQuality).join(",")
+  );
+
+  if (!available.length) {
+    /* Keep compatibility for older posts with only Auto/unknown quality. */
+    var fallback = (blocks || []).slice().sort(function (a, b) {
+      return blockScore(b) - blockScore(a);
+    }).slice(0, 2);
+
+    function fallbackNext(i) {
+      if (i >= fallback.length) return Promise.resolve([]);
+      return resolveCandidates(fallback[i].links, detailUrl).then(function (r) {
+        if (!r || !r.url) return fallbackNext(i + 1);
+        var q = fallback[i].quality || "Auto";
+        return [buildStream(r, q, detailUrl)];
+      }).catch(function () { return fallbackNext(i + 1); });
+    }
+    return fallbackNext(0);
+  }
+
+  var ready = [];
+  var pending = available.length;
+  var firstResolved = false;
+  var resolveFirst;
+  var resolveAll;
+
+  var firstGood = new Promise(function (resolve) { resolveFirst = resolve; });
+  var allDone = new Promise(function (resolve) { resolveAll = resolve; });
+
+  available.forEach(function (q) {
+    resolveOneQuality(blocks, q, detailUrl).then(function (stream) {
+      if (stream) {
+        ready.push(stream);
+        if (!firstResolved) {
+          firstResolved = true;
+          resolveFirst(true);
+        }
+      }
+    }).catch(function () {
+      /* One slow/broken quality must not hold the other qualities. */
+    }).then(function () {
+      pending--;
+      if (pending <= 0) resolveAll(true);
+    });
+  });
+
+  var grace = firstGood.then(function () {
+    return new Promise(function (resolve) {
+      setTimeout(resolve, MULTI_FIRST_GRACE_MS);
+    });
+  });
+
+  var absolute = new Promise(function (resolve) {
+    setTimeout(resolve, MULTI_ABSOLUTE_MS);
+  });
+
+  return Promise.race([allDone, grace, absolute]).then(function () {
+    var rank = { "4K": 3, "1080p": 2, "720p": 1 };
+    var seen = {};
+    var finalStreams = ready.filter(function (s) {
+      if (!s || !s.url || seen[s.quality]) return false;
+      seen[s.quality] = true;
+      return true;
+    }).sort(function (a, b) {
+      return (rank[b.quality] || 0) - (rank[a.quality] || 0);
+    });
+
+    console.log(
+      "[4KHDHub] multi-quality ready=" +
+      finalStreams.map(function (s) { return s.quality + ":" + hostOf(s.url); }).join(",")
+    );
+
+    return finalStreams;
+  });
 }
 
 function getStreams(tmdbId, mediaType, season, episode) {
   mediaType = mediaType === "tv" ? "tv" : "movie";
   season = Number(season || 1);
   episode = Number(episode || 1);
-  console.log("[4KHDHub] TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : ""));
+  var startedAt = Date.now();
+  console.log("[4KHDHub] v" + VERSION + " TMDB=" + tmdbId + " type=" + mediaType + (mediaType === "tv" ? " S" + season + "E" + episode : ""));
   var info;
   var detail;
   return tmdbDetails(tmdbId, mediaType)
@@ -581,7 +721,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (streams) {
       streams = streams || [];
-      console.log("[4KHDHub] v" + VERSION + " playable sources=" + streams.length);
+      console.log("[4KHDHub] v" + VERSION + " playable sources=" + streams.length + " elapsed=" + (Date.now() - startedAt) + "ms");
       return streams;
     })
     .catch(function (e) {

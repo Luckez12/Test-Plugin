@@ -1,5 +1,5 @@
 const PROVIDER = "4KHDHub";
-const VERSION = "1.0.0";
+const VERSION = "1.0.1";
 const BASES = ["https://4khdhub.one", "https://4khdhub.fans"];
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -302,7 +302,32 @@ function toPixel(url) {
   var m = String(url || "").match(/^(https?:\/\/[^/]+)\/(?:u\/)?([^/?#]+)/i);
   return m ? m[1] + "/api/file/" + m[2] + "?download" : url;
 }
-function probeFinal(url, referer) {
+function headerGet(res, name) {
+  try { return String(res && res.headers && res.headers.get ? (res.headers.get(name) || "") : ""); } catch (_) { return ""; }
+}
+function contentTotalBytes(res) {
+  var cr = headerGet(res, "content-range");
+  var m = cr.match(/\/(\d+)\s*$/);
+  if (m) return Number(m[1]) || 0;
+  var cl = Number(headerGet(res, "content-length") || 0);
+  return isFinite(cl) ? cl : 0;
+}
+function inspectMediaResponse(res, originalUrl) {
+  var ct = headerGet(res, "content-type").toLowerCase().split(";")[0].trim();
+  var cd = headerGet(res, "content-disposition").toLowerCase();
+  var finalUrl = String((res && res.url) || originalUrl || "");
+  var total = contentTotalBytes(res);
+  var okStatus = !!res && res.status >= 200 && res.status < 400;
+  var isText = /^(text\/html|text\/plain|application\/json|application\/javascript)/.test(ct);
+  var isManifest = /mpegurl|dash\+xml/.test(ct) || /\.(m3u8|mpd)(?:$|[?#])/i.test(finalUrl);
+  var mediaType = /^video\//.test(ct) || /octet-stream|matroska|mp4/.test(ct);
+  var attachment = /attachment/.test(cd);
+  var fileLike = mediaLike(finalUrl);
+  var sizeOk = !total || total >= 10 * 1024 * 1024 || isManifest;
+  var playable = okStatus && !isText && sizeOk && (isManifest || mediaType || attachment || fileLike);
+  return { playable: playable, url: finalUrl, type: ct, total: total };
+}
+function rangeProbe(url, referer) {
   return fetch(url, {
     method: "GET",
     headers: {
@@ -312,17 +337,30 @@ function probeFinal(url, referer) {
       "Referer": referer || ""
     }
   }).then(function (res) {
-    var ct = String(res.headers && res.headers.get ? (res.headers.get("content-type") || "") : "").toLowerCase();
-    var cr = String(res.headers && res.headers.get ? (res.headers.get("content-range") || "") : "");
-    var cd = String(res.headers && res.headers.get ? (res.headers.get("content-disposition") || "") : "").toLowerCase();
-    var finalUrl = res.url || url;
-    var ok = res.status === 200 || res.status === 206;
-    var playable = ok && (mediaLike(finalUrl) || /video|octet-stream|matroska|mp4|mpegurl/.test(ct) || !!cr || /attachment/.test(cd));
-    console.log("[4KHDHub] probe host=" + hostOf(url) + " status=" + res.status + " type=" + ct.split(";")[0] + " playable=" + playable);
-    return playable ? finalUrl : null;
-  }).catch(function (e) {
-    console.log("[4KHDHub] probe fail host=" + hostOf(url) + " error=" + (e && e.message ? e.message : String(e)));
-    return null;
+    var x = inspectMediaResponse(res, url);
+    console.log("[4KHDHub] range probe host=" + hostOf(url) + " status=" + res.status + " type=" + x.type + " MB=" + (x.total ? Math.round(x.total / 1048576) : "?") + " playable=" + x.playable);
+    return x.playable ? x.url : null;
+  });
+}
+function probeFinal(url, referer) {
+  return fetch(url, {
+    method: "HEAD",
+    headers: {
+      "User-Agent": UA,
+      "Accept": "*/*",
+      "Referer": referer || ""
+    }
+  }).then(function (res) {
+    var x = inspectMediaResponse(res, url);
+    console.log("[4KHDHub] head probe host=" + hostOf(url) + " status=" + res.status + " type=" + x.type + " MB=" + (x.total ? Math.round(x.total / 1048576) : "?") + " playable=" + x.playable);
+    if (x.playable) return x.url;
+    if (/^(text\/html|application\/json)/.test(x.type)) return null;
+    return rangeProbe(url, referer).catch(function () { return null; });
+  }).catch(function () {
+    return rangeProbe(url, referer).catch(function (e) {
+      console.log("[4KHDHub] probe fail host=" + hostOf(url) + " error=" + (e && e.message ? e.message : String(e)));
+      return null;
+    });
   });
 }
 
@@ -372,7 +410,7 @@ function resolveHubCdn(url, referer) {
     var decoded = b64decode(encoded || "");
     var link = decoded ? decoded.substring(decoded.lastIndexOf("link=") + 5) : "";
     if (!link || link === decoded && decoded.indexOf("link=") < 0) return null;
-    return probeFinal(link, url).then(function (p) { return p || link; });
+    return probeFinal(link, url).then(function (p) { return p || null; });
   }).catch(function () { return null; });
 }
 
@@ -417,8 +455,17 @@ function resolveHubCloud(url, referer) {
         var u = x.url;
         var l = String(x.label || "").toLowerCase();
         if (/privacy|contact|home|login|telegram|discord|4khdhub/i.test(l) && !/download|server|10gbps/.test(l)) return tryButton(i + 1);
-        if (/workers\.dev/i.test(u) || mediaLike(u)) return Promise.resolve({ url: u, referer: "", label: x.label || "Direct" });
-        if (/pixeldrain|pixelserver/i.test(u + " " + l)) return Promise.resolve({ url: toPixel(u), referer: next, label: "PixelDrain" });
+        if (/workers\.dev/i.test(u) || mediaLike(u)) {
+          return probeFinal(u, next).then(function (p) {
+            return p ? { url: p, referer: /workers\.dev/i.test(u) ? "" : next, label: x.label || "Direct" } : tryButton(i + 1);
+          });
+        }
+        if (/pixeldrain|pixelserver/i.test(u + " " + l)) {
+          var pixel = toPixel(u);
+          return probeFinal(pixel, next).then(function (p) {
+            return p ? { url: p, referer: next, label: "PixelDrain" } : tryButton(i + 1);
+          });
+        }
         if (/hubcdn\.fans/i.test(u)) {
           return probeFinal(u, next).then(function (p) { return p ? { url: p, referer: "", label: "Fast 10Gbps" } : tryButton(i + 1); });
         }
@@ -451,8 +498,17 @@ function resolveServer(url, referer) {
   if (!url) return Promise.resolve(null);
   return resolveFourKRedirect(url).then(function (resolved) {
     resolved = String(resolved || url);
-    if (/workers\.dev/i.test(resolved) || mediaLike(resolved)) return { url: resolved, referer: referer || "", label: "Direct" };
-    if (/pixeldrain/i.test(resolved)) return { url: toPixel(resolved), referer: referer || "", label: "PixelDrain" };
+    if (/workers\.dev/i.test(resolved) || mediaLike(resolved)) {
+      return probeFinal(resolved, referer).then(function (p) {
+        return p ? { url: p, referer: /workers\.dev/i.test(resolved) ? "" : (referer || ""), label: "Direct" } : null;
+      });
+    }
+    if (/pixeldrain/i.test(resolved)) {
+      var pixel = toPixel(resolved);
+      return probeFinal(pixel, referer).then(function (p) {
+        return p ? { url: p, referer: referer || "", label: "PixelDrain" } : null;
+      });
+    }
     if (/hubcloud/i.test(resolved)) return resolveHubCloud(resolved, referer);
     if (/hubdrive/i.test(resolved)) return resolveHubDrive(resolved, referer);
     if (/hubcdn/i.test(resolved)) return resolveHubCdn(resolved, referer).then(function (p) { return p ? { url: p, referer: resolved, label: "HubCDN" } : null; });
@@ -479,6 +535,7 @@ function resolveBlocks(blocks, detailUrl) {
     console.log("[4KHDHub] try block=" + b.quality + " servers=" + links.map(hostOf).join("|"));
     return resolveCandidates(links, detailUrl).then(function (r) {
       if (!r || !r.url) return tryBlock(i + 1);
+      console.log("[4KHDHub] selected host=" + hostOf(r.url) + " label='" + (r.label || "Direct") + "' quality=" + b.quality + " verified=true");
       return [{
         name: PROVIDER,
         title: "4KHDHub • " + b.quality + " • " + (r.label || hostOf(r.url)),

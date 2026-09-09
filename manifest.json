@@ -130,8 +130,8 @@
     {
       "id": "4khdhub",
       "name": "4KHDHub",
-      "description": "4KHDHub movies and TV series provider with fast HubCloud/HubDrive resolution",
-      "version": "1.0.0",
+      "description": "4KHDHub movies and TV series provider with verified playable HubCloud/HubDrive links",
+      "version": "1.0.1",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

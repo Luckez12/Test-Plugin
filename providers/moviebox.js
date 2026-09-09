@@ -1,8 +1,13 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.0.7";
+const VERSION = "1.0.8";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
-const CryptoJS = require("crypto-js");
+var CryptoJS = null;
+
+function getCryptoJS() {
+  if (!CryptoJS) CryptoJS = require("crypto-js");
+  return CryptoJS;
+}
 
 const API_HOSTS = [
   "https://api.inmoviebox.com",
@@ -152,6 +157,7 @@ function pathnameOf(url) {
 }
 
 function buildSignedHeaders(method, url, body, authToken) {
+  var CryptoJS = getCryptoJS();
   var accept = "application/json";
   var contentType = body !== null ? "application/json; charset=utf-8" : "application/json";
   var ts = Date.now();

@@ -107,7 +107,7 @@
       "id": "moviebox",
       "name": "MovieBox",
       "description": "MovieBox mobile API provider with fast verified direct resource playback",
-      "version": "1.0.7",
+      "version": "1.0.8",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",
@@ -124,33 +124,6 @@
         "en",
         "id",
         "ms"
-      ],
-      "supportsExternalPlayer": true
-    },
-    {
-      "id": "4khdhub",
-      "name": "4KHDHub",
-      "description": "4KHDHub movies and TV series provider with verified playable HubCloud/HubDrive links",
-      "version": "1.0.1",
-      "author": "Luckez12",
-      "supportedTypes": [
-        "movie",
-        "tv"
-      ],
-      "filename": "providers/4khdhub.js",
-      "enabled": true,
-      "hasSettings": false,
-      "formats": [
-        "mkv",
-        "mp4",
-        "m3u8",
-        "mpd"
-      ],
-      "contentLanguage": [
-        "en",
-        "hi",
-        "ta",
-        "te"
       ],
       "supportsExternalPlayer": true
     }

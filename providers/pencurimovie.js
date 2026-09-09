@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.1.1";
+const VERSION = "1.1.2";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -1267,24 +1267,43 @@ function resolveMirrors(mirrors, pageUrl) {
 
   if (!selected.length) return Promise.resolve([]);
 
-  // Start DSV immediately together with the next best mirrors. The previous
-  // build returned 0 just before DSV produced a verified 206 MP4.
-  var tasks = selected.slice(0, 5).map(function (mirror) {
-    return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
-  });
+  // DSV is the proven working path. Resolve it alone first so VUEO does not
+  // keep waiting on background PlayMogo/VOE/StreamTape requests after the
+  // provider already has a playable source.
+  var dsv = null;
+  for (var i = 0; i < selected.length; i++) {
+    if (/dsvplay\.com$/i.test(hostOf(selected[i].url))) {
+      dsv = selected[i];
+      break;
+    }
+  }
 
-  return firstVerifiedMirror(tasks, 6200).then(function (ready) {
+  function resolveOne(mirror, waitMsValue) {
+    if (!mirror) return Promise.resolve([]);
+    return firstVerifiedMirror([
+      resolveMirror(mirror, pageUrl, 0).catch(function () { return []; })
+    ], waitMsValue);
+  }
+
+  return resolveOne(dsv, 4600).then(function (ready) {
     if (ready.length) {
-      console.log("[PencuriMovie] fast-first ready host=" + hostOf(ready[0].url));
+      console.log("[PencuriMovie] DSV-first ready host=" + hostOf(ready[0].url));
       return ready;
     }
 
-    // Last mirror only, with a short safety window.
-    var last = selected.slice(5, 6).map(function (mirror) {
+    // Only start other hosts when DSV really fails.
+    var fallbackMirrors = selected.filter(function (mirror) {
+      return !dsv || mirror.url !== dsv.url;
+    }).slice(0, 3);
+
+    console.log("[PencuriMovie] DSV-first failed, fallback=" +
+      fallbackMirrors.map(function (x) { return hostOf(x.url); }).join("|"));
+
+    var tasks = fallbackMirrors.map(function (mirror) {
       return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
     });
 
-    return firstVerifiedMirror(last, 1000).then(function (fallbackReady) {
+    return firstVerifiedMirror(tasks, 2300).then(function (fallbackReady) {
       if (fallbackReady.length) {
         console.log("[PencuriMovie] fallback ready host=" + hostOf(fallbackReady[0].url));
       }

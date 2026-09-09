@@ -1,559 +1,491 @@
-const PROVIDER = "KissKH";
-const PROVIDER_VERSION = "1.0.4";
-const BASES = [
-  "https://kisskh.do",
-  "https://kisskh.id",
-  "https://kisskh.co",
-  "https://kisskh.li"
-];
+"use strict";
 
-const TMDB_BASE = "https://api.themoviedb.org/3";
-const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
-const KISSKH_VERSION = "2.8.10";
-const ENCDEC_API = "https://enc-dec.app/api";
-const VIDEO_KEY_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id=";
-const SUBTITLE_KEY_API = "https://script.google.com/macros/s/AKfycbyq6hTj0ZhlinYC6xbggtgo166tp6XaDKBCGtnYk8uOfYBUFwwxBui0sGXiu_zIFmA/exec?id=";
-const USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
+var PROVIDER_NAME = "KissKH";
+var VERSION = "1.0.4";
+var PRIMARY_BASE_URL = "https://kisskh.do";
+var FALLBACK_BASE_URL = "https://kisskh.id";
+var BASE_URL = PRIMARY_BASE_URL;
+var KISSKH_VERSION = "2.8.10";
+var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
+var VIDEO_KEY_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id=";
 
-function fetchJson(url, options) {
-  return fetch(url, options || {})
-    .then(function (res) {
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.text();
-    })
-    .then(function (text) {
-      try { return JSON.parse(text); } catch (_) { return null; }
-    })
-    .catch(function () { return null; });
+var USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
+var DEFAULT_HEADERS = {
+  "User-Agent": USER_AGENT,
+  "Accept": "application/json, text/plain, */*"
+};
+
+function headersFor(baseUrl, extra) {
+  return Object.assign({}, DEFAULT_HEADERS, {
+    "Referer": String(baseUrl || BASE_URL).replace(/\/+$/, "") + "/"
+  }, extra || {});
+}
+
+function fetchJson(url, headers) {
+  return fetch(url, {
+    method: "GET",
+    headers: Object.assign({}, DEFAULT_HEADERS, headers || {}),
+    redirect: "follow"
+  }).then(function(response) {
+    if (!response.ok) {
+      throw new Error("HTTP " + response.status + " for " + url);
+    }
+    return response.json();
+  });
 }
 
 function normalizeTitle(value) {
   return String(value || "")
     .toLowerCase()
-    .replace(/[’‘`´]/g, "'")
-    .replace(/([a-z0-9])'s\b/g, "$1s")
-    .replace(/\[[^\]]*\]/g, " ")
-    .replace(/\([^)]*\)/g, " ")
-    .replace(/season\s*0*(\d+)/g, " season $1 ")
+    .replace(/&/g, " and ")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function slugify(value) {
-  return String(value || "")
-    .replace(/[^a-zA-Z0-9]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "");
+function titleScore(candidate, expected) {
+  var left = normalizeTitle(candidate);
+  var right = normalizeTitle(expected);
+  if (!left || !right) return 0;
+  if (left === right) return 100;
+  if (left.indexOf(right) !== -1 || right.indexOf(left) !== -1) return 75;
+
+  var expectedWords = right.split(" ");
+  var candidateWords = new Set(left.split(" "));
+  var matched = expectedWords.filter(function(word) {
+    return word.length > 1 && candidateWords.has(word);
+  }).length;
+
+  return Math.round((matched / Math.max(expectedWords.length, 1)) * 60);
 }
 
-function fixUrl(url, base) {
-  const value = String(url || "").trim();
-  if (!value) return "";
-  if (value.indexOf("//") === 0) return "https:" + value;
-  if (value.indexOf("/") === 0) return base + value;
-  return value;
+
+function uniqueText(values) {
+  var out = [];
+  var seen = {};
+  (values || []).forEach(function(value) {
+    var text = String(value || "").trim();
+    var key = normalizeTitle(text);
+    if (!text || !key || seen[key]) return;
+    seen[key] = true;
+    out.push(text);
+  });
+  return out;
+}
+
+function collectTmdbAliases(data, mediaType) {
+  var values = [
+    data && (data.title || data.name),
+    data && (data.original_title || data.original_name)
+  ];
+
+  var alt = data && data.alternative_titles;
+  var altItems = alt && Array.isArray(alt.titles)
+    ? alt.titles
+    : alt && Array.isArray(alt.results)
+      ? alt.results
+      : [];
+
+  altItems.forEach(function(item) {
+    if (item) values.push(item.title || item.name);
+  });
+
+  var translations = data && data.translations && Array.isArray(data.translations.translations)
+    ? data.translations.translations
+    : [];
+
+  translations.forEach(function(item) {
+    var row = item && item.data;
+    if (row) values.push(row.title || row.name);
+  });
+
+  return uniqueText(values).slice(0, 12);
+}
+
+function buildSearchQueries(info) {
+  var seeds = uniqueText(
+    [info.title, info.originalTitle].concat(info.aliases || [])
+  ).slice(0, 8);
+
+  var out = [];
+  var seen = {};
+
+  function add(value) {
+    var text = String(value || "").replace(/\s+/g, " ").trim();
+    var key = text.toLowerCase();
+    if (!text || seen[key]) return;
+    seen[key] = true;
+    out.push(text);
+  }
+
+  seeds.forEach(function(title) {
+    add(title);
+
+    // KissKH search has historically behaved differently around apostrophes.
+    add(title.replace(/[’'`]/g, ""));
+    add(title.replace(/[’'`]s\b/gi, ""));
+    add(title.replace(/[’'`]/g, " "));
+
+    if (info.year) {
+      add(title + " " + info.year);
+    }
+  });
+
+  return out.slice(0, 10);
+}
+
+function typeLabel(value) {
+  if (!value || typeof value !== "object") return "";
+  return String(
+    value.typeName ||
+    value.type ||
+    value.dramaType ||
+    value.category ||
+    ""
+  ).toLowerCase();
+}
+
+function typePenalty(value, mediaType) {
+  var label = typeLabel(value);
+  if (!label) return 0;
+
+  if (mediaType === "movie") {
+    if (/movie|film|webmovie/.test(label)) return 18;
+    if (/tv|series|drama/.test(label)) return -70;
+  } else {
+    if (/tv|series|drama/.test(label)) return 18;
+    if (/movie|film|webmovie/.test(label)) return -70;
+  }
+  return 0;
+}
+
+function yearScore(detailYear, expectedYear) {
+  if (!detailYear || !expectedYear) return 0;
+  var diff = Math.abs(Number(detailYear) - Number(expectedYear));
+  if (diff === 0) return 35;
+  if (diff === 1) return 8;
+  return -90;
+}
+
+function candidateSummary(items) {
+  return (items || []).slice(0, 8).map(function(item) {
+    var year = item && (item.year || item.releaseYear || "");
+    var label = typeLabel(item);
+    return String(item && item.title || "?") +
+      (year ? " (" + year + ")" : "") +
+      (label ? " [" + label + "]" : "");
+  }).join(" | ");
 }
 
 function inferQuality(url) {
-  const match = String(url || "").match(/(?:^|[^0-9])(2160|1440|1080|720|480|360)(?:p|[^0-9]|$)/i);
-  return match ? match[1] + "p" : "Auto";
+  var value = String(url || "").toLowerCase();
+  if (value.indexOf("2160") !== -1 || value.indexOf("4k") !== -1) return "2160p";
+  if (value.indexOf("1080") !== -1) return "1080p";
+  if (value.indexOf("720") !== -1) return "720p";
+  if (value.indexOf("480") !== -1) return "480p";
+  if (value.indexOf("360") !== -1) return "360p";
+  return "Auto";
 }
 
-function isDirectVideo(url) {
-  const value = String(url || "").toLowerCase();
+function isDirectStream(url) {
+  var value = String(url || "").toLowerCase();
   return value.indexOf(".m3u8") !== -1 || value.indexOf(".mp4") !== -1;
 }
 
-function fetchTmdbDetails(tmdbId, mediaType) {
-  const type = mediaType === "movie" ? "movie" : "tv";
-  const url = TMDB_BASE + "/" + type + "/" + encodeURIComponent(tmdbId) +
-    "?api_key=" + TMDB_API_KEY + "&append_to_response=external_ids,alternative_titles";
+function getTmdbInfo(tmdbId, mediaType) {
+  var endpoint = mediaType === "movie" ? "movie" : "tv";
+  var url = "https://api.themoviedb.org/3/" + endpoint + "/" + encodeURIComponent(tmdbId) +
+    "?api_key=" + TMDB_API_KEY +
+    "&append_to_response=alternative_titles,translations,external_ids";
 
-  return fetchJson(url, {
-    headers: {
-      "Accept": "application/json",
-      "User-Agent": USER_AGENT
+  function normalizeData(data, context) {
+    return {
+      title: data.title || data.name || context && context.title || "",
+      originalTitle: data.original_title || data.original_name || context && context.originalTitle || "",
+      year: String(
+        data.release_date ||
+        data.first_air_date ||
+        context && context.year ||
+        ""
+      ).split("-")[0],
+      aliases: uniqueText(
+        collectTmdbAliases(data, mediaType).concat(
+          context && Array.isArray(context.aliases) ? context.aliases : []
+        )
+      )
+    };
+  }
+
+  if (
+    typeof globalThis !== "undefined" &&
+    typeof globalThis.vueoDiscoveryContext === "function"
+  ) {
+    return Promise.resolve(globalThis.vueoDiscoveryContext(url))
+      .then(function(context) {
+        if (context && context.tmdb) {
+          return normalizeData(context.tmdb, context);
+        }
+        throw new Error("shared metadata unavailable");
+      })
+      .catch(function() {
+        return fetchJson(url, {}).then(function(data) {
+          return normalizeData(data, null);
+        });
+      });
+  }
+
+  return fetchJson(url, {}).then(function(data) {
+    return normalizeData(data, null);
+  });
+}
+
+function searchKissKh(baseUrl, query) {
+  var base = String(baseUrl || PRIMARY_BASE_URL).replace(/\/+$/, "");
+  var url = base + "/api/DramaList/Search?q=" + encodeURIComponent(query) + "&type=0";
+  return fetchJson(url, headersFor(base, {})).then(function(data) {
+    var rows = Array.isArray(data) ? data : [];
+    console.log("[KissKH] search host=" + base + " query='" + query + "' items=" + rows.length);
+    return rows;
+  });
+}
+
+function getDramaDetail(baseUrl, id) {
+  var base = String(baseUrl || PRIMARY_BASE_URL).replace(/\/+$/, "");
+  var url = base + "/api/DramaList/Drama/" + encodeURIComponent(id) + "?isq=false";
+  return fetchJson(url, headersFor(base, {})).then(function(detail) {
+    if (detail && typeof detail === "object") detail.__baseUrl = base;
+    return detail;
+  });
+}
+
+function findBestDrama(info, mediaType) {
+  var queries = buildSearchQueries(info);
+  var bases = [PRIMARY_BASE_URL, FALLBACK_BASE_URL];
+
+  function searchBase(baseIndex) {
+    if (baseIndex >= bases.length) {
+      throw new Error("No strict KissKH match");
     }
-  }).then(function (data) {
-    if (!data) return null;
-    const altRoot = data.alternative_titles || {};
-    const altItems = type === "movie"
-      ? (Array.isArray(altRoot.titles) ? altRoot.titles : [])
-      : (Array.isArray(altRoot.results) ? altRoot.results : []);
 
-    const alternativeTitles = altItems
-      .map(function (x) { return x && x.title ? String(x.title).trim() : ""; })
-      .filter(Boolean);
+    var base = bases[baseIndex];
+
+    return Promise.all(
+      queries.map(function(query) {
+        return searchKissKh(base, query).catch(function() { return []; });
+      })
+    ).then(function(groups) {
+      var seen = {};
+      var candidates = [];
+
+      groups.forEach(function(group) {
+        (group || []).forEach(function(item) {
+          if (!item || item.id === undefined) return;
+          var key = String(item.id);
+          if (seen[key]) return;
+          seen[key] = true;
+          candidates.push(item);
+        });
+      });
+
+      candidates.sort(function(a, b) {
+        function quickScore(item) {
+          var best = 0;
+          var aliases = uniqueText([info.title, info.originalTitle].concat(info.aliases || []));
+          aliases.forEach(function(alias) {
+            best = Math.max(best, titleScore(item && item.title, alias));
+          });
+          return best + typePenalty(item, mediaType);
+        }
+        return quickScore(b) - quickScore(a);
+      });
+
+      console.log(
+        "[KissKH] candidates host=" + base +
+        " count=" + candidates.length +
+        (candidates.length ? " top=" + candidateSummary(candidates) : "")
+      );
+
+      candidates = candidates.slice(0, 10);
+      if (!candidates.length) return null;
+
+      return Promise.all(candidates.map(function(candidate) {
+        return getDramaDetail(base, candidate.id)
+          .then(function(detail) {
+            var aliases = uniqueText([info.title, info.originalTitle].concat(info.aliases || []));
+            var score = 0;
+
+            aliases.forEach(function(alias) {
+              score = Math.max(score, titleScore(detail && detail.title, alias));
+            });
+
+            var detailYear = String(
+              detail && (
+                detail.releaseDate ||
+                detail.release_date ||
+                detail.year ||
+                ""
+              ) || ""
+            ).split("-")[0];
+
+            score += yearScore(detailYear, info.year);
+            score += typePenalty(detail, mediaType);
+            score += typePenalty(candidate, mediaType);
+
+            // One-episode entries are strong movie evidence.
+            if (
+              mediaType === "movie" &&
+              detail &&
+              Array.isArray(detail.episodes) &&
+              detail.episodes.length === 1
+            ) {
+              score += 15;
+            }
+
+            return {
+              detail: detail,
+              candidate: candidate,
+              score: score,
+              year: detailYear
+            };
+          })
+          .catch(function() { return null; });
+      })).then(function(matches) {
+        matches = matches.filter(Boolean).sort(function(a, b) {
+          return b.score - a.score;
+        });
+
+        var best = matches[0];
+        if (!best || best.score < 75) {
+          return null;
+        }
+
+        if (
+          info.year &&
+          best.year &&
+          Math.abs(Number(info.year) - Number(best.year)) > 1
+        ) {
+          return null;
+        }
+
+        console.log(
+          "[KissKH] MATCH host=" + base +
+          " title='" + String(best.detail && best.detail.title || "") +
+          "' year=" + (best.year || "?") +
+          " score=" + Math.round(best.score)
+        );
+
+        BASE_URL = base;
+        return best.detail;
+      });
+    }).then(function(match) {
+      if (match) return match;
+      return searchBase(baseIndex + 1);
+    });
+  }
+
+  return searchBase(0).catch(function(error) {
+    console.log(
+      "[KissKH] No strict match for " +
+      info.title + " (" + (info.year || "?") + ")" +
+      " queries=" + queries.join(" | ")
+    );
+    throw error;
+  });
+}
+
+function selectEpisode(detail, mediaType, season, episode) {
+  var episodes = Array.isArray(detail.episodes) ? detail.episodes : [];
+  if (episodes.length === 0) throw new Error("No KissKH episodes");
+
+  if (mediaType === "movie" || episodes.length === 1) {
+    return episodes[0];
+  }
+
+  var requestedEpisode = Number(episode || 1);
+  var exact = episodes.find(function(item) {
+    return Number(item.number) === requestedEpisode;
+  });
+
+  if (!exact) throw new Error("Episode " + requestedEpisode + " not found on KissKH");
+  if (Number(season || 1) > 1) {
+    console.log("[KissKH] Source does not expose seasons; matching by episode number only");
+  }
+  return exact;
+}
+
+function getVideoKey(episodeId) {
+  var url = VIDEO_KEY_API + encodeURIComponent(episodeId) + "&version=" + encodeURIComponent(KISSKH_VERSION);
+  return fetchJson(url, {}).then(function(data) {
+    if (!data || !data.key) throw new Error("Empty KissKH video key");
+    return data.key;
+  });
+}
+
+function getSources(episodeId, key) {
+  var base = String(BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "");
+  var url = base + "/api/DramaList/Episode/" + encodeURIComponent(episodeId) +
+    ".png?err=false&ts=&time=&kkey=" + encodeURIComponent(key);
+  return fetchJson(url, headersFor(base, {
+    "Origin": base,
+    "Referer": base + "/"
+  }));
+}
+
+function buildStreams(source, info, season, episode) {
+  var urls = [source && source.Video, source && source.ThirdParty]
+    .map(function(value) { return String(value || "").trim(); })
+    .filter(function(value, index, array) {
+      return value && isDirectStream(value) && array.indexOf(value) === index;
+    });
+
+  return urls.map(function(url, index) {
+    var quality = inferQuality(url);
+    var episodeLabel = episode ? " S" + String(season || 1).padStart(2, "0") +
+      "E" + String(episode).padStart(2, "0") : "";
 
     return {
-      title: type === "movie" ? (data.title || data.original_title) : (data.name || data.original_name),
-      originalTitle: data.original_title || data.original_name || "",
-      year: String(data.release_date || data.first_air_date || "").slice(0, 4),
-      alternativeTitles: alternativeTitles
+      name: PROVIDER_NAME + (urls.length > 1 ? " Server " + (index + 1) : ""),
+      title: (info.title || PROVIDER_NAME) + episodeLabel,
+      url: url,
+      quality: quality,
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Referer": String(BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "") + "/",
+        "Origin": String(BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "")
+      }
     };
   });
 }
 
-function buildQueries(details, mediaType, season) {
-  const out = [];
-
-  function add(value) {
-    value = String(value || "").replace(/\s+/g, " ").trim();
-    if (value && out.indexOf(value) === -1) out.push(value);
-  }
-
-  function addVariants(value) {
-    value = String(value || "").trim();
-    if (!value) return;
-
-    add(value);
-
-    // KissKH search can miss titles containing apostrophes or punctuation.
-    // Try the common site/index spellings without making matching permissive.
-    add(value.replace(/[’‘`´]/g, "'"));
-    add(value.replace(/['’‘`´]/g, ""));
-    add(value.replace(/['’‘`´]/g, " "));
-    add(value.replace(/[^a-zA-Z0-9]+/g, " "));
-
-    const words = value
-      .replace(/[’‘`´]/g, "'")
-      .replace(/([a-zA-Z0-9])'s\b/g, "$1s")
-      .replace(/[^a-zA-Z0-9]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim()
-      .split(" ")
-      .filter(Boolean);
-
-    // Last-resort focused phrase, useful when the full title search returns
-    // KissKH's generic/popular list instead of a real search result.
-    if (words.length >= 2) add(words.slice(0, Math.min(3, words.length)).join(" "));
-  }
-
-  const titles = [details.title, details.originalTitle]
-    .concat(Array.isArray(details.alternativeTitles) ? details.alternativeTitles : [])
-    .filter(Boolean);
-
-  if (mediaType === "tv" && Number(season || 1) > 1) {
-    titles.forEach(function (title) {
-      addVariants(title + " Season " + Number(season));
-    });
-  }
-
-  titles.forEach(addVariants);
-
-  // Year form can help distinguish remakes and generic titles.
-  if (details.year) {
-    [details.title, details.originalTitle].filter(Boolean).forEach(function (title) {
-      addVariants(title + " " + details.year);
-    });
-  }
-
-  return out.slice(0, 14);
-}
-
-function searchBase(base, query) {
-  const url = base + "/api/DramaList/Search?q=" + encodeURIComponent(query) + "&type=0";
-  return fetchJson(url, {
-    headers: {
-      "Accept": "application/json",
-      "Referer": base + "/",
-      "User-Agent": USER_AGENT
-    }
-  }).then(function (data) {
-    return Array.isArray(data) ? data : null;
-  });
-}
-
-function searchWorkingBase(queries) {
-  let chain = Promise.resolve(null);
-
-  BASES.forEach(function (base) {
-    chain = chain.then(function (found) {
-      if (found) return found;
-      return searchBase(base, queries[0]).then(function (items) {
-        if (items === null) return null;
-        return { base: base, firstItems: items };
-      });
-    });
-  });
-
-  return chain;
-}
-
-function collectCandidates(base, queries, firstItems) {
-  const map = {};
-
-  (firstItems || []).forEach(function (item) {
-    if (item && item.id != null) map[String(item.id)] = item;
-  });
-
-  const remaining = queries.slice(1, 10);
-  return Promise.all(remaining.map(function (query) {
-    return searchBase(base, query).then(function (items) {
-      return { query: query, items: items || [] };
-    }).catch(function () {
-      return { query: query, items: [] };
-    });
-  })).then(function (results) {
-    results.forEach(function (result) {
-      result.items.forEach(function (item) {
-        if (item && item.id != null) map[String(item.id)] = item;
-      });
-    });
-
-    console.log(
-      "[KissKH] search variants=" + Math.min(queries.length, 10) +
-      " candidates=" + Object.keys(map).length
-    );
-
-    return Object.keys(map).map(function (key) { return map[key]; });
-  });
-}
-
-function acceptedTitles(details, mediaType, season) {
-  const set = {};
-
-  function add(value) {
-    const normalized = normalizeTitle(value);
-    if (normalized) set[normalized] = true;
-  }
-
-  const titles = [details.title, details.originalTitle]
-    .concat(Array.isArray(details.alternativeTitles) ? details.alternativeTitles : [])
-    .filter(Boolean);
-
-  titles.forEach(add);
-
-  if (mediaType === "tv" && Number(season || 1) > 1) {
-    titles.forEach(function (title) {
-      add(title + " Season " + Number(season));
-    });
-  }
-
-  if (details.year) {
-    titles.forEach(function (title) {
-      add(title + " " + details.year);
-    });
-  }
-
-  return set;
-}
-
-function isCorrectMediaType(detail, item, mediaType) {
-  const values = [
-    String(detail && detail.type || "").trim().toLowerCase(),
-    String(item && item.type || "").trim().toLowerCase()
-  ].filter(Boolean);
-
-  if (!values.length) return true;
-
-  const saysMovie = values.some(function (type) {
-    return type === "movie" || type === "film";
-  });
-
-  const saysSeries = values.some(function (type) {
-    return type === "tv" ||
-      type === "series" ||
-      type === "tvseries" ||
-      type === "drama" ||
-      type === "anime";
-  });
-
-  if (mediaType === "movie") {
-    if (saysMovie) return true;
-    if (saysSeries) return false;
-    return true;
-  }
-
-  if (saysMovie) return false;
-  return true;
-}
-
-function strictMatch(detail, item, details, mediaType, season) {
-  if (!detail) return null;
-  if (!isCorrectMediaType(detail, item, mediaType)) return null;
-
-  const validTitles = acceptedTitles(details, mediaType, season);
-  const detailTitle = normalizeTitle(detail.title);
-  const itemTitle = normalizeTitle(item && item.title);
-
-  if (!validTitles[detailTitle] && !validTitles[itemTitle]) {
-    return null;
-  }
-
-  const targetYear = String(details.year || "").slice(0, 4);
-  const resultYear = String(detail.releaseDate || "").slice(0, 4);
-
-  // Some titles use festival/premiere year while TMDB UI uses wide-release year.
-  // Keep matching safe by allowing only a one-year difference.
-  if (targetYear && resultYear) {
-    const diff = Math.abs(Number(targetYear) - Number(resultYear));
-    if (!Number.isFinite(diff) || diff > 1) return null;
-  }
-
-  let score = 100;
-
-  if (targetYear && resultYear) {
-    const diff = Math.abs(Number(targetYear) - Number(resultYear));
-    if (diff === 0) score += 50;
-    else if (diff === 1) score += 20;
-  }
-  if (detailTitle === normalizeTitle(details.title)) score += 25;
-  if (detailTitle === normalizeTitle(details.originalTitle)) score += 15;
-
-  if (mediaType === "tv" && Number(season || 1) > 1) {
-    const seasonTitle = normalizeTitle(details.title + " Season " + Number(season));
-    if (detailTitle === seasonTitle || itemTitle === seasonTitle) score += 25;
-  }
-
-  return score;
-}
-
-function fetchDetail(base, id) {
-  return fetchJson(base + "/api/DramaList/Drama/" + encodeURIComponent(id) + "?isq=false", {
-    headers: {
-      "Accept": "application/json",
-      "Referer": base + "/",
-      "User-Agent": USER_AGENT
-    }
-  });
-}
-
-function chooseBestMatch(base, candidates, details, mediaType, season) {
-  return Promise.all((candidates || []).slice(0, 30).map(function (item) {
-    return fetchDetail(base, item.id).then(function (detail) {
-      return {
-        item: item,
-        detail: detail,
-        score: strictMatch(detail, item, details, mediaType, season)
-      };
-    });
-  })).then(function (items) {
-    const valid = items
-      .filter(function (x) { return typeof x.score === "number"; })
-      .sort(function (a, b) { return b.score - a.score; });
-
-    if (!valid.length) {
-      const sample = items.slice(0, 8).map(function (x) {
-        const title = String((x.detail && x.detail.title) || (x.item && x.item.title) || "");
-        const year = String((x.detail && x.detail.releaseDate) || "").slice(0, 4);
-        const type = String((x.detail && x.detail.type) || (x.item && x.item.type) || "");
-        return title + (year ? " (" + year + ")" : "") + (type ? " [" + type + "]" : "");
-      }).join(" | ");
-
-      console.log(
-        "[KissKH] No strict match for " +
-        details.title + " (" + (details.year || "?") + ")" +
-        (sample ? " candidates=" + sample : "")
-      );
-      return null;
-    }
-
-    const best = valid[0];
-    console.log(
-      "[KissKH] Matched id=" + best.item.id +
-      " title=" + String(best.detail.title || best.item.title || "") +
-      " year=" + String(best.detail.releaseDate || "").slice(0, 4)
-    );
-
-    return best;
-  });
-}
-
-function pickEpisode(detail, mediaType, episode) {
-  const episodes = detail && Array.isArray(detail.episodes) ? detail.episodes : [];
-  if (!episodes.length) return null;
-
-  if (mediaType === "movie") {
-    return episodes.find(function (e) { return e && e.id != null; }) || null;
-  }
-
-  const target = Number(episode || 1);
-  return episodes.find(function (e) {
-    return e && e.id != null && Math.abs(Number(e.number) - target) < 0.001;
-  }) || null;
-}
-
-function googleKey(episodeId, kind) {
-  const endpoint = kind === "sub" ? SUBTITLE_KEY_API : VIDEO_KEY_API;
-  return fetchJson(endpoint + encodeURIComponent(episodeId) + "&version=" + KISSKH_VERSION)
-    .then(function (data) { return data && data.key ? String(data.key) : ""; });
-}
-
-function encDecKey(episodeId, kind) {
-  return fetchJson(ENCDEC_API + "/enc-kisskh?text=" + encodeURIComponent(episodeId) + "&type=" + kind)
-    .then(function (data) {
-      return data && data.status === 200 && data.result ? String(data.result) : "";
-    });
-}
-
-function getKey(episodeId, kind) {
-  return googleKey(episodeId, kind).then(function (key) {
-    if (key) return key;
-    return encDecKey(episodeId, kind);
-  });
-}
-
-function subtitleLanguage(label) {
-  const value = String(label || "").trim().toLowerCase();
-  if (!value) return null;
-
-  if (value === "en" || value.indexOf("english") !== -1 || /(^|[^a-z])eng([^a-z]|$)/.test(value)) {
-    return { language: "en", name: "English" };
-  }
-  if (value === "ms" || value === "msa" || value === "may" || value.indexOf("malay") !== -1 || value.indexOf("melayu") !== -1) {
-    return { language: "ms", name: "Malay" };
-  }
-  if (value === "id" || value === "ind" || value.indexOf("indonesia") !== -1) {
-    return { language: "id", name: "Indonesian" };
-  }
-  return null;
-}
-
-function fetchSubtitles(base, episodeId) {
-  return getKey(episodeId, "sub").then(function (key) {
-    if (!key) return [];
-    return fetchJson(base + "/api/Sub/" + encodeURIComponent(episodeId) + "?kkey=" + encodeURIComponent(key), {
-      headers: {
-        "Accept": "application/json",
-        "Referer": base + "/",
-        "User-Agent": USER_AGENT
-      }
-    }).then(function (items) {
-      if (!Array.isArray(items)) return [];
-      const seen = {};
-      const result = [];
-
-      items.forEach(function (sub) {
-        const lang = subtitleLanguage(sub && sub.label);
-        let src = fixUrl(sub && sub.src, base);
-        if (!lang || !src) return;
-
-        if (/\.txt(?:\?|$)/i.test(src)) {
-          src = ENCDEC_API + "/dec-kisskh?url=" + encodeURIComponent(src);
-        }
-
-        const key2 = lang.language + "|" + src;
-        if (seen[key2]) return;
-        seen[key2] = true;
-
-        result.push({
-          url: src,
-          language: lang.language,
-          name: lang.name,
-          headers: { "Referer": base + "/", "User-Agent": USER_AGENT }
-        });
-      });
-
-      return result;
-    });
-  }).catch(function () { return []; });
-}
-
-function fetchStreams(base, detail, episodeInfo, mediaType, season, episode, displayTitle) {
-  const episodeId = episodeInfo.id;
-  const episodeNumber = Number(episodeInfo.number || episode || 1);
-
-  return Promise.all([
-    getKey(episodeId, "vid"),
-    fetchSubtitles(base, episodeId)
-  ]).then(function (values) {
-    const videoKey = values[0];
-    const subtitles = values[1] || [];
-    if (!videoKey) return [];
-
-    const slug = slugify(detail.title || displayTitle);
-    const referer = base + "/Drama/" + slug + "/Episode-" + episodeNumber +
-      "?id=" + detail.id + "&ep=" + episodeId + "&page=0&pageSize=100";
-    const apiUrl = base + "/api/DramaList/Episode/" + episodeId +
-      ".png?err=false&ts=&time=&kkey=" + encodeURIComponent(videoKey);
-
-    return fetchJson(apiUrl, {
-      headers: {
-        "Accept": "application/json",
-        "Referer": referer,
-        "User-Agent": USER_AGENT
-      }
-    }).then(function (source) {
-      if (!source) return [];
-
-      const rawLinks = [source.Video, source.ThirdParty]
-        .map(function (x) { return fixUrl(x, base); })
-        .filter(function (x, i, arr) { return x && arr.indexOf(x) === i; });
-
-      const streams = [];
-      rawLinks.forEach(function (url) {
-        if (!isDirectVideo(url)) return;
-        const quality = inferQuality(url);
-        const format = url.toLowerCase().indexOf(".m3u8") !== -1 ? "HLS" : "MP4";
-        const suffix = mediaType === "tv" ? " S" + Number(season || 1) + "E" + Number(episode || 1) : "";
-
-        streams.push({
-          name: PROVIDER,
-          title: (displayTitle || detail.title || PROVIDER) + suffix + " - " + quality + " [" + format + "]",
-          url: url,
-          quality: quality,
-          headers: {
-            "Referer": base + "/",
-            "Origin": base,
-            "User-Agent": USER_AGENT
-          },
-          subtitles: subtitles,
-          provider: "kisskh"
-        });
-      });
-
-      return streams;
-    });
-  });
-}
-
 function getStreams(tmdbId, mediaType, season, episode) {
-  mediaType = mediaType === "movie" ? "movie" : "tv";
-  season = Number(season || 1);
-  episode = Number(episode || 1);
+  var type = mediaType === "movie" ? "movie" : "tv";
+  console.log("[KissKH] v" + VERSION + " TMDB=" + tmdbId + " type=" + type +
+    (type === "tv" ? " S" + (season || 1) + "E" + (episode || 1) : ""));
 
-  console.log("[KissKH] v" + PROVIDER_VERSION + " TMDB=" + tmdbId + " type=" + mediaType + " S" + season + "E" + episode);
-
-  return fetchTmdbDetails(tmdbId, mediaType)
-    .then(function (details) {
-      if (!details || !details.title) return [];
-      const queries = buildQueries(details, mediaType, season);
-      console.log("[KissKH] title='" + details.title + "' year=" + (details.year || "?") +
-        " queries=" + queries.slice(0, 6).join(" | "));
-
-      return searchWorkingBase(queries).then(function (working) {
-        if (!working) return [];
-
-        return collectCandidates(working.base, queries, working.firstItems)
-          .then(function (candidates) {
-            return chooseBestMatch(working.base, candidates, details, mediaType, season);
-          })
-          .then(function (match) {
-            if (!match || !match.detail) return [];
-            const ep = pickEpisode(match.detail, mediaType, episode);
-            if (!ep) {
-              console.log("[KissKH] Episode not found");
-              return [];
-            }
-
-            return fetchStreams(
-              working.base,
-              match.detail,
-              ep,
-              mediaType,
-              season,
-              episode,
-              details.title
-            );
-          });
+  var info;
+  return getTmdbInfo(tmdbId, type)
+    .then(function(value) {
+      info = value;
+      if (!info.title) throw new Error("TMDB title is empty");
+      console.log("[KissKH] title='" + info.title + "' year=" + (info.year || "?") + " aliases=" + (info.aliases || []).length);
+      return findBestDrama(info, type);
+    })
+    .then(function(detail) {
+      var selected = selectEpisode(detail, type, season, episode);
+      if (!selected || selected.id === undefined) throw new Error("KissKH episode ID is missing");
+      return getVideoKey(selected.id).then(function(key) {
+        return getSources(selected.id, key);
       });
     })
-    .catch(function (error) {
-      console.error("[KissKH] " + (error && error.message ? error.message : error));
+    .then(function(source) {
+      var streams = buildStreams(source, info, type === "tv" ? season || 1 : null, type === "tv" ? episode || 1 : null);
+      console.log("[KissKH] Direct streams found=" + streams.length);
+      return streams;
+    })
+    .catch(function(error) {
+      console.error("[KissKH] " + error.message);
       return [];
     });
 }
 
-module.exports = { getStreams };
+module.exports = { getStreams: getStreams };

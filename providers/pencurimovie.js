@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.1.0";
+const VERSION = "1.1.1";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -893,16 +893,12 @@ function resolveGeneric(url, referer, depth) {
 }
 
 function mirrorPriority(mirror) {
-  var value = (String(mirror && mirror.label || "") + " " + String(mirror && mirror.url || "")).toLowerCase();
-  if (isLikelyStreamUrl(mirror.url)) return 0;
-  if (/playmate|playm/.test(value)) return 1;
-  if (/streamwish|hglink|wish|filelion|vidhide|filemoon/.test(value)) return 2;
-  if (/voe/.test(value)) return 3;
-  if (/mixdrop|mxdrop/.test(value)) return 4;
-  if (/dsvplay|dood/.test(value)) return 5;
-  if (/streamtape|stape/.test(value)) return 6;
-  if (/abyss|playhydrax/.test(value)) return 7;
-  return 10;
+  var host = hostOf(mirror && mirror.url);
+  if (/dsvplay\.com$/i.test(host)) return 0;
+  if (/playmogo\.com$/i.test(host)) return 1;
+  if (/voe\./i.test(host)) return 2;
+  if (/streamtape\.com$/i.test(host)) return 3;
+  return 9;
 }
 
 function resolveMirror(mirror, pageUrl, depth) {
@@ -1106,7 +1102,7 @@ function verifyFastStream(stream) {
 
   return Promise.race([
     probe,
-    waitMs(1300, null)
+    waitMs(2200, null)
   ]);
 }
 
@@ -1262,7 +1258,7 @@ function formatStreams(streams) {
 function resolveMirrors(mirrors, pageUrl) {
   var selected = (mirrors || []).slice().sort(function (a, b) {
     return mirrorPriority(a) - mirrorPriority(b);
-  }).slice(0, 5);
+  }).slice(0, 6);
 
   console.log("[PencuriMovie] mirrors=" + mirrors.length);
   console.log("[PencuriMovie] mirror hosts=" + selected.map(function (x) {
@@ -1271,24 +1267,24 @@ function resolveMirrors(mirrors, pageUrl) {
 
   if (!selected.length) return Promise.resolve([]);
 
-  // Fast lane: start the best three mirrors together and return as soon as
-  // one verified direct media URL is available. Do not wait for every host.
-  var fast = selected.slice(0, 3).map(function (mirror) {
+  // Start DSV immediately together with the next best mirrors. The previous
+  // build returned 0 just before DSV produced a verified 206 MP4.
+  var tasks = selected.slice(0, 5).map(function (mirror) {
     return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
   });
 
-  return firstVerifiedMirror(fast, 3000).then(function (ready) {
+  return firstVerifiedMirror(tasks, 6200).then(function (ready) {
     if (ready.length) {
       console.log("[PencuriMovie] fast-first ready host=" + hostOf(ready[0].url));
       return ready;
     }
 
-    // Short fallback lane for remaining mirrors.
-    var fallback = selected.slice(3, 5).map(function (mirror) {
+    // Last mirror only, with a short safety window.
+    var last = selected.slice(5, 6).map(function (mirror) {
       return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
     });
 
-    return firstVerifiedMirror(fallback, 1800).then(function (fallbackReady) {
+    return firstVerifiedMirror(last, 1000).then(function (fallbackReady) {
       if (fallbackReady.length) {
         console.log("[PencuriMovie] fallback ready host=" + hostOf(fallbackReady[0].url));
       }
@@ -1296,7 +1292,6 @@ function resolveMirrors(mirrors, pageUrl) {
     });
   });
 }
-
 function getStreams(tmdbId, mediaType, season, episode) {
   var startedAt = Date.now();
   mediaType = mediaType === "tv" ? "tv" : "movie";

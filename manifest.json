@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.7.5",
+  "version": "1.7.6",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -78,8 +78,8 @@
     {
       "id": "kisskh",
       "name": "KissKH",
-      "description": "KissKH Asian dramas and movies",
-      "version": "1.0.3",
+      "description": "KissKH strict title/year provider with punctuation, possessive and alternate search fallback",
+      "version": "1.0.4",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

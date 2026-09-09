@@ -1,4 +1,5 @@
 const PROVIDER = "KissKH";
+const PROVIDER_VERSION = "1.0.4";
 const BASES = [
   "https://kisskh.do",
   "https://kisskh.id",
@@ -29,6 +30,8 @@ function fetchJson(url, options) {
 function normalizeTitle(value) {
   return String(value || "")
     .toLowerCase()
+    .replace(/[’‘`´]/g, "'")
+    .replace(/([a-z0-9])'s\b/g, "$1s")
     .replace(/\[[^\]]*\]/g, " ")
     .replace(/\([^)]*\)/g, " ")
     .replace(/season\s*0*(\d+)/g, " season $1 ")
@@ -96,8 +99,35 @@ function buildQueries(details, mediaType, season) {
   const out = [];
 
   function add(value) {
-    value = String(value || "").trim();
+    value = String(value || "").replace(/\s+/g, " ").trim();
     if (value && out.indexOf(value) === -1) out.push(value);
+  }
+
+  function addVariants(value) {
+    value = String(value || "").trim();
+    if (!value) return;
+
+    add(value);
+
+    // KissKH search can miss titles containing apostrophes or punctuation.
+    // Try the common site/index spellings without making matching permissive.
+    add(value.replace(/[’‘`´]/g, "'"));
+    add(value.replace(/['’‘`´]/g, ""));
+    add(value.replace(/['’‘`´]/g, " "));
+    add(value.replace(/[^a-zA-Z0-9]+/g, " "));
+
+    const words = value
+      .replace(/[’‘`´]/g, "'")
+      .replace(/([a-zA-Z0-9])'s\b/g, "$1s")
+      .replace(/[^a-zA-Z0-9]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .split(" ")
+      .filter(Boolean);
+
+    // Last-resort focused phrase, useful when the full title search returns
+    // KissKH's generic/popular list instead of a real search result.
+    if (words.length >= 2) add(words.slice(0, Math.min(3, words.length)).join(" "));
   }
 
   const titles = [details.title, details.originalTitle]
@@ -106,12 +136,20 @@ function buildQueries(details, mediaType, season) {
 
   if (mediaType === "tv" && Number(season || 1) > 1) {
     titles.forEach(function (title) {
-      add(title + " Season " + Number(season));
+      addVariants(title + " Season " + Number(season));
     });
   }
 
-  titles.forEach(add);
-  return out.slice(0, 12);
+  titles.forEach(addVariants);
+
+  // Year form can help distinguish remakes and generic titles.
+  if (details.year) {
+    [details.title, details.originalTitle].filter(Boolean).forEach(function (title) {
+      addVariants(title + " " + details.year);
+    });
+  }
+
+  return out.slice(0, 14);
 }
 
 function searchBase(base, query) {
@@ -150,19 +188,25 @@ function collectCandidates(base, queries, firstItems) {
     if (item && item.id != null) map[String(item.id)] = item;
   });
 
-  let chain = Promise.resolve();
-
-  queries.slice(1).forEach(function (query) {
-    chain = chain.then(function () {
-      return searchBase(base, query).then(function (items) {
-        (items || []).forEach(function (item) {
-          if (item && item.id != null) map[String(item.id)] = item;
-        });
+  const remaining = queries.slice(1, 10);
+  return Promise.all(remaining.map(function (query) {
+    return searchBase(base, query).then(function (items) {
+      return { query: query, items: items || [] };
+    }).catch(function () {
+      return { query: query, items: [] };
+    });
+  })).then(function (results) {
+    results.forEach(function (result) {
+      result.items.forEach(function (item) {
+        if (item && item.id != null) map[String(item.id)] = item;
       });
     });
-  });
 
-  return chain.then(function () {
+    console.log(
+      "[KissKH] search variants=" + Math.min(queries.length, 10) +
+      " candidates=" + Object.keys(map).length
+    );
+
     return Object.keys(map).map(function (key) { return map[key]; });
   });
 }
@@ -470,12 +514,14 @@ function getStreams(tmdbId, mediaType, season, episode) {
   season = Number(season || 1);
   episode = Number(episode || 1);
 
-  console.log("[KissKH] TMDB=" + tmdbId + " type=" + mediaType + " S" + season + "E" + episode);
+  console.log("[KissKH] v" + PROVIDER_VERSION + " TMDB=" + tmdbId + " type=" + mediaType + " S" + season + "E" + episode);
 
   return fetchTmdbDetails(tmdbId, mediaType)
     .then(function (details) {
       if (!details || !details.title) return [];
       const queries = buildQueries(details, mediaType, season);
+      console.log("[KissKH] title='" + details.title + "' year=" + (details.year || "?") +
+        " queries=" + queries.slice(0, 6).join(" | "));
 
       return searchWorkingBase(queries).then(function (working) {
         if (!working) return [];

@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "CineMode";
-var VERSION = "1.0.2";
+var VERSION = "1.0.3";
 var BASE_URL = "https://cinemode.fun";
 var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -730,7 +730,7 @@ function runDirectRouteWebview(tmdbId, info, mediaType, season, episode, timeout
   var startUrl = detailRoute(tmdbId, mediaType);
 
   console.log(
-    "[CineMode] direct-route webview=" + startUrl +
+    "[CineMode] direct-route webview=" + startUrl + " externalNav=on" +
     " timeout=" + timeoutMs +
     (mediaType === "tv" ? " S" + season + "E" + episode : "")
   );
@@ -748,7 +748,7 @@ function runDirectRouteWebview(tmdbId, info, mediaType, season, episode, timeout
     finishAfterFirstMs: 950,
 
     suppressPopups: true,
-    lockMainFrameHost: true,
+    lockMainFrameHost: false,
 
     interactionTexts: directRouteInteractions(
       mediaType,
@@ -779,9 +779,11 @@ function runDirectRouteWebview(tmdbId, info, mediaType, season, episode, timeout
       ".mp4",
       ".m4v",
       "/sora/",
-      "master.m3u8",
-      "manifest.m3u8",
-      "playlist.m3u8",
+      "/master",
+      "/manifest",
+      "/playlist",
+      "/stream",
+      "/video",
       "mime=video",
       "type=video"
     ],
@@ -843,7 +845,7 @@ function runHomepageFallback(searchTitle, info, mediaType, season, episode, time
     timeoutMs: timeoutMs,
     finishAfterFirstMs: 700,
     suppressPopups: true,
-    lockMainFrameHost: true,
+    lockMainFrameHost: false,
     interactionTexts: buildInteractionTexts(
       searchTitle,
       info,

@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.2.3",
+  "version": "1.3.0",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -26,6 +26,30 @@
       "logo": "https://i.postimg.cc/DZpW6Xfb/4khdhub.png"
     },
     {
+      "id": "hdhub4u",
+      "name": "HDHub4u",
+      "description": "HDHub4u fast search provider with strict TMDB matching and verified HubCloud/Pixeldrain playback",
+      "version": "1.0.0",
+      "author": "Luckez12",
+      "supportedTypes": [
+        "movie",
+        "tv"
+      ],
+      "filename": "providers/hdhub4u.js",
+      "enabled": true,
+      "hasSettings": false,
+      "formats": [
+        "mp4",
+        "m3u8",
+        "mkv"
+      ],
+      "contentLanguage": [
+        "hi",
+        "en"
+      ],
+      "supportsExternalPlayer": true
+    },
+    {
       "id": "cinemode",
       "name": "CineMode",
       "description": "CineMode exact-TMDB-route WebView provider with external player navigation and verified direct playback",
@@ -36,7 +60,7 @@
         "tv"
       ],
       "filename": "providers/cinemode.js",
-      "enabled": true,
+      "enabled": false,
       "hasSettings": false,
       "formats": [
         "m3u8",

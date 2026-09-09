@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "HDHub4u";
-var VERSION = "1.0.1";
+var VERSION = "1.0.2";
 var PRIMARY_BASE = "https://new5.hdhub4u.cl";
 var FALLBACK_BASES = ["https://hdhub4u.frl"];
 var DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
@@ -478,7 +478,9 @@ function parseContentRangeStart(value) {
 }
 
 function isR2Storage(url) {
-  return /(?:^|\.)r2\.cloudflarestorage\.com$/i.test(hostOf(url));
+  var host = hostOf(url);
+  return /(?:^|\.)r2\.cloudflarestorage\.com$/i.test(host) ||
+         /(?:^|\.)r2\.dev$/i.test(host);
 }
 
 function verifySeekRange(url, referer, total) {
@@ -569,14 +571,27 @@ function verifyDirect(url, referer) {
       referer,
       info.total || 0
     ).then(function(seekable) {
+      if (isR2Storage(info.url)) {
+        console.log(
+          "[HDHub4u] reject R2 playback host=" +
+          hostOf(info.url) +
+          " reason=VUEO-seek-restart"
+        );
+        return null;
+      }
+
+      if (!seekable) {
+        console.log(
+          "[HDHub4u] reject non-seekable host=" +
+          hostOf(info.url)
+        );
+        return null;
+      }
+
       return {
         url: info.url,
-        seekable: seekable,
-        /*
-         * Raw R2 download objects are allowed only as final fallback because
-         * some Android players restart on seek even though byte 0 returns 206.
-         */
-        weakSeek: !seekable || isR2Storage(info.url),
+        seekable: true,
+        weakSeek: false,
         total: info.total || 0
       };
     });
@@ -646,7 +661,7 @@ function serverScore(url, label) {
   if (/hblinks/.test(s)) return 780;
   if (/streamtape/.test(s)) return 650;
   if (/download file/.test(s)) return 500;
-  if (/r2\.cloudflarestorage\.com/.test(s)) return 200;
+  if (/r2\.cloudflarestorage\.com|r2\.dev/.test(s)) return 50;
   return 300;
 }
 
@@ -704,14 +719,11 @@ function resolveHubCloud(url, referer) {
     });
     console.log("[HDHub4u] HubCloud buttons=" + buttons.length + " host=" + hostOf(page.pageUrl));
 
-    var weakFallback = null;
-
     function acceptOrContinue(hit, index) {
       if (!hit) return next(index + 1);
       if (hit.weakSeek || isR2Storage(hit.url)) {
-        if (!weakFallback) weakFallback = hit;
         console.log(
-          "[HDHub4u] defer weak-seek host=" +
+          "[HDHub4u] skip weak-seek host=" +
           hostOf(hit.url) +
           " label='" +
           (hit.label || "") +
@@ -723,8 +735,8 @@ function resolveHubCloud(url, referer) {
     }
 
     function next(i) {
-      if (i >= buttons.length || i >= 8) {
-        return Promise.resolve(weakFallback);
+      if (i >= buttons.length || i >= 12) {
+        return Promise.resolve(null);
       }
 
       var b = buttons[i];

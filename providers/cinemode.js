@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.0.4";
+var VERSION = "2.0.5";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -9,11 +9,11 @@ var UA =
   "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
-var BUDGET_MS = 8300;
+var BUDGET_MS = 8200;
 var PAGE_TIMEOUT_MS = 1500;
 var BUNDLE_TIMEOUT_MS = 1350;
 var ROUTE_WEBVIEW_MS = 3900;
-var PLAYER_WEBVIEW_MS = 3300;
+var PLAYER_WEBVIEW_MS = 4200;
 var VERIFY_MS = 900;
 
 var MEDIA_RE = /\.(?:m3u8|mp4|m4v|webm)(?:$|[?#])/i;
@@ -526,7 +526,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
     referer: playerStage ? BASE + "/" : BASE + "/",
     directLoad: true,
     timeoutMs: timeoutMs,
-    finishAfterFirstMs: playerStage ? 850 : 850,
+    finishAfterFirstMs: playerStage ? 2700 : 850,
 
     /*
      * CineMode is ad-supported and its watch action can navigate away from
@@ -545,7 +545,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
       ? [350, 850, 1450, 2200, 2850]
       : [450, 950, 1550, 2350, 3200],
 
-    match: playerStage && isZxc(startUrl) ? ZXC_MATCH : PLAYER_HINTS,
+    match: playerStage && isZxc(startUrl) ? ["https://"] : PLAYER_HINTS,
     blocked: BLOCKED,
     injectAbyssHook: true
   }).then(function(result) {
@@ -665,18 +665,57 @@ function verifyDirect(item) {
   });
 }
 
+
+function zxcPlayerReferer(tmdbId, type, season, episode) {
+  if (type === "tv") {
+    return "https://player.zxcstream.xyz/player/tv/" +
+      encodeURIComponent(tmdbId) + "/" +
+      encodeURIComponent(season) + "/" +
+      encodeURIComponent(episode);
+  }
+  return "https://player.zxcstream.xyz/player/movie/" +
+    encodeURIComponent(tmdbId);
+}
+
+function isNoiseRequest(url) {
+  var h = hostOf(url);
+  var s = String(url || "").toLowerCase();
+
+  if (!h) return true;
+  if (isStaticAssetUrl(url)) return true;
+  if (/google-analytics|googletagmanager|cloudflareinsights|vercel-insights/.test(h)) return true;
+  if (/favicon|registersw|service-worker|manifest\.json/.test(s)) return true;
+  return false;
+}
+
+function genericSessionCandidate(url) {
+  if (!/^https?:\/\//i.test(String(url || ""))) return false;
+  if (isNoiseRequest(url) || blocked(url)) return false;
+  if (isZxc(url) && /\/player\//i.test(String(url || ""))) return false;
+  if (likelySourceEndpoint(url)) return false;
+
+  /*
+   * After ZXC's protected /backend_/sources call, the actual media/CDN
+   * request may be extensionless. Keep any remaining non-static request as
+   * a candidate and let verifyDirect decide by response content-type.
+   */
+  return true;
+}
+
 function capturedRows(rows, fallbackReferer) {
   var direct = [];
   var players = [];
   var endpoints = [];
+  var session = [];
   var seenDirect = {};
   var seenPlayer = {};
   var seenEndpoint = {};
+  var seenSession = {};
 
   (rows || []).forEach(function(row) {
     if (!row || !row.url) return;
     var url = String(row.url).trim();
-    if (!url || blocked(url) || isStaticAssetUrl(url)) return;
+    if (!url || blocked(url) || isNoiseRequest(url)) return;
 
     var referer =
       String(row.referer || row.referrer || fallbackReferer || BASE + "/");
@@ -688,7 +727,7 @@ function capturedRows(rows, fallbackReferer) {
         url: url,
         referer: referer,
         headers: sanitiseHeaders(row.headers, referer),
-        label: row.label || "",
+        label: row.label || "ZXC media",
         quality: inferQuality(url, row.label)
       });
       return;
@@ -710,15 +749,33 @@ function capturedRows(rows, fallbackReferer) {
 
     if (isZxc(url) && /\/player\//i.test(url)) return;
 
+    if (genericSessionCandidate(url)) {
+      if (!seenSession[url]) {
+        seenSession[url] = true;
+        session.push({
+          url: url,
+          referer: referer,
+          headers: sanitiseHeaders(row.headers, referer),
+          label: row.label || "ZXC session",
+          quality: inferQuality(url, row.label)
+        });
+      }
+      return;
+    }
+
     if (!looksLikePlayer(url)) return;
     if (seenPlayer[url]) return;
     seenPlayer[url] = true;
     players.push(url);
   });
 
-  return { direct: direct, players: players, endpoints: endpoints };
+  return {
+    direct: direct,
+    players: players,
+    endpoints: endpoints,
+    session: session
+  };
 }
-
 
 function endpointMeta(url) {
   try {
@@ -877,88 +934,82 @@ function extractMediaCandidates(text, baseUrl, referer, headers) {
   return out;
 }
 
-function resolveCapturedEndpoints(rows) {
-  var list = (rows || []).slice(0, 6);
+function resolveCapturedEndpoints(rows, tmdbId, type, season, episode) {
+  var list = (rows || []).slice(0, 3);
   if (!list.length) return Promise.resolve(null);
 
-  return Promise.all(list.map(function(row, index) {
-    var headers = sanitiseHeaders(row.headers, row.referer);
-    delete headers.Range;
+  var playerRef = zxcPlayerReferer(tmdbId, type, season, episode);
+  var playerOrigin = "https://player.zxcstream.xyz";
 
-    /*
-     * Preserve captured Origin if present. If WebView did not provide it,
-     * derive it from the ZXC player referer.
-     */
-    if (!headers.Origin && !headers.origin) {
-      var origin = originOf(row.referer);
-      if (origin) headers.Origin = origin;
+  return Promise.all(list.map(function(row, index) {
+    var captured = sanitiseHeaders(row.headers, playerRef);
+    var headers = {};
+
+    Object.keys(captured || {}).forEach(function(k) {
+      headers[k] = captured[k];
+    });
+
+    delete headers.Range;
+    headers["User-Agent"] = headers["User-Agent"] || UA;
+    headers["Accept"] = "application/json,text/plain,*/*";
+    headers["Referer"] = playerRef;
+    headers["Origin"] = playerOrigin;
+    headers["Sec-Fetch-Dest"] = "empty";
+    headers["Sec-Fetch-Mode"] = "cors";
+    headers["Sec-Fetch-Site"] = "same-site";
+
+    var method = String(row.method || "GET").toUpperCase();
+    if (method !== "POST") method = "GET";
+
+    var options = {
+      method: method,
+      headers: headers,
+      redirect: "follow"
+    };
+
+    if (method === "POST" && row.body) {
+      options.body = row.body;
     }
 
     var meta = endpointMeta(row.url);
     console.log(
-      "[CineMode] endpoint#" + (index + 1) +
+      "[CineMode] source-replay#" + (index + 1) +
       " host=" + meta.host +
       " path=" + meta.path +
-      (meta.params ? " params=" + meta.params : "")
+      " method=" + method
     );
 
     return timeout(
-      fetch(row.url, {
-        method: "GET",
-        headers: headers,
-        redirect: "follow"
-      }).then(function(res) {
+      fetch(row.url, options).then(function(res) {
         var ct = "";
         try { ct = String(res.headers.get("content-type") || "").toLowerCase(); } catch (_) {}
 
         return res.text().then(function(text) {
           var parsed = tryJson(text);
+          var err = parsed && parsed.error ? String(parsed.error).replace(/\s+/g, " ").slice(0, 120) : "";
 
           console.log(
-            "[CineMode] endpoint#" + (index + 1) +
+            "[CineMode] source-replay#" + (index + 1) +
             " status=" + res.status +
             " ct=" + (ct || "?") +
-            " bytes=" + String(text || "").length +
-            (parsed ? " keys=" + printableKeys(parsed) : "")
+            (err ? " error='" + err + "'" : "")
           );
 
           if (!(res.status >= 200 && res.status < 300)) return null;
 
-          /*
-           * Endpoint itself may be an extensionless HLS playlist.
-           */
-          if (/mpegurl/.test(ct) || String(text || "").indexOf("#EXTM3U") !== -1) {
-            return verifyDirect({
-              url: res.url || row.url,
-              referer: row.referer,
-              headers: headers,
-              label: "ZXC HLS",
-              quality: inferQuality(res.url || row.url, "")
-            });
-          }
-
           var candidates = sourceCandidatesFromResponse(
             text,
             res.url || row.url,
-            row.referer,
+            playerRef,
             headers
           );
 
-          console.log(
-            "[CineMode] endpoint#" + (index + 1) +
-            " mediaCandidates=" + candidates.length
-          );
-
-          return verifyFirst(candidates, 6);
+          return verifyFirst(candidates, 4);
         });
       }),
-      1500,
-      "source endpoint"
-    ).catch(function(error) {
-      console.log(
-        "[CineMode] endpoint#" + (index + 1) +
-        " fail=" + (error && error.message ? error.message : String(error))
-      );
+      1100,
+      "source replay"
+    ).catch(function() {
       return null;
     });
   })).then(function(results) {
@@ -1116,6 +1167,7 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
         console.log(
           "[CineMode] player parsed host=" + hostOf(u) +
           " direct=" + parsed.direct.length +
+          " session=" + parsed.session.length +
           " endpoints=" + parsed.endpoints.length +
           " childPlayers=" + parsed.players.length +
           (parsed.endpoints[0] && parsed.endpoints[0].method
@@ -1123,14 +1175,29 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
             : "")
         );
 
-        return verifyFirst(parsed.direct, 4).then(function(hit) {
+        return verifyFirst(parsed.direct, 6).then(function(hit) {
           if (hit) return hit;
 
-          return resolveCapturedEndpoints(parsed.endpoints).then(function(endpointHit) {
-            if (endpointHit) return endpointHit;
+          return verifyFirst(parsed.session, 8).then(function(sessionHit) {
+            if (sessionHit) {
+              console.log(
+                "[CineMode] browser-session HIT host=" +
+                hostOf(sessionHit.url)
+              );
+              return sessionHit;
+            }
 
-            console.log("[CineMode] no usable captured source -> ZXC API probe");
-            return probeZxcApis(u, tmdbId, type, season, episode);
+            /*
+             * Replay is fallback only. ZXC source endpoints are protected,
+             * so the browser session is preferred whenever possible.
+             */
+            return resolveCapturedEndpoints(
+              parsed.endpoints,
+              tmdbId,
+              type,
+              season,
+              episode
+            );
           });
         });
       });
@@ -1193,70 +1260,20 @@ function getStreams(tmdbId, mediaType, season, episode) {
         " identity=" + pageMatches(page.text, info, id)
       );
 
-      /*
-       * Read the current deployed site's own HTML + JS chunks. This gives us
-       * player/embed hints without hard-coding yesterday's provider domain.
-       */
-      var hintsPromise = inspectSiteBundles(
-        page,
-        id,
-        type,
-        s,
-        e
-      ).catch(function() { return []; });
+      if (!nativeAvailable()) return [];
 
-      if (!nativeAvailable()) {
-        return hintsPromise.then(function(hints) {
-          return resolvePlayerPages(hints, type, s, e, startedAt, id);
-        }).then(function(hit) {
-          return hit ? [toStream(hit, info, type, s, e)] : [];
-        });
-      }
-
-      var remaining = BUDGET_MS - (Date.now() - startedAt) - VERIFY_MS - 300;
-      if (remaining < 1400) return [];
-
-      var routeTimeout = Math.min(
-        ROUTE_WEBVIEW_MS,
-        remaining
+      console.log(
+        "[CineMode] real-site ZXC player confirmed -> browser-session capture"
       );
 
-      /*
-       * Actual site flow first: exact /movie/{tmdb} or /tv/{tmdb}, click
-       * Watch/Play, permit the external player navigation/pop-up.
-       */
-      return Promise.all([
-        hintsPromise,
-        webviewCapture(route, type, s, e, routeTimeout, false)
-      ]).then(function(parts) {
-        var hints = parts[0] || [];
-        var capture = capturedRows(parts[1] || [], route);
-
-        console.log(
-          "[CineMode] route direct=" + capture.direct.length +
-          " playerLinks=" + capture.players.length
-        );
-
-        return verifyFirst(capture.direct, 4).then(function(directHit) {
-          if (directHit) {
-            console.log(
-              "[CineMode] DIRECT HIT host=" + hostOf(directHit.url) +
-              " elapsed=" + (Date.now() - startedAt) + "ms"
-            );
-            return directHit;
-          }
-
-          var players = capture.players.concat(hints);
-          return resolvePlayerPages(
-            players,
-            type,
-            s,
-            e,
-            startedAt,
-            id
-          );
-        });
-      }).then(function(hit) {
+      return resolvePlayerPages(
+        [],
+        type,
+        s,
+        e,
+        startedAt,
+        id
+      ).then(function(hit) {
         if (!hit) return [];
         console.log(
           "[CineMode] PLAYER HIT host=" + hostOf(hit.url) +

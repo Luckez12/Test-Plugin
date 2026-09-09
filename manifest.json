@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -28,8 +28,8 @@
     {
       "id": "cinemode",
       "name": "CineMode",
-      "description": "CineMode fast-first provider with long WebView fallback and verified direct stream playback",
-      "version": "1.0.1",
+      "description": "CineMode exact-TMDB-route WebView provider with verified direct playback",
+      "version": "1.0.2",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

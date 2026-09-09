@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "CineMode";
-var VERSION = "1.0.1";
+var VERSION = "1.0.2";
 var BASE_URL = "https://cinemode.fun";
 var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -10,10 +10,10 @@ var USER_AGENT =
   "(KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
 /* Keep the whole provider below VUEO's ~10s scan timeout. */
-var PROVIDER_BUDGET_MS = 9300;
+var PROVIDER_BUDGET_MS = 9200;
 var FAST_PATH_BUDGET_MS = 950;
-var PRIMARY_WEBVIEW_MS = 7350;
-var ALIAS_WEBVIEW_MS = 1200;
+var PRIMARY_WEBVIEW_MS = 7600;
+var HOME_FALLBACK_MS = 1350;
 var VERIFY_TIMEOUT_MS = 700;
 
 var DIRECT_EXT_RE = /\.(m3u8|mp4|m4v)(?:$|[?#])/i;
@@ -683,10 +683,157 @@ function buildInteractionTexts(searchTitle, info, mediaType, season, episode) {
   return output;
 }
 
-function runWebview(searchTitle, info, mediaType, season, episode, timeoutMs) {
+function detailRoute(tmdbId, mediaType) {
+  if (mediaType === "tv") {
+    return BASE_URL + "/tv/" + encodeURIComponent(tmdbId);
+  }
+  return BASE_URL + "/movie/" + encodeURIComponent(tmdbId);
+}
+
+function directRouteInteractions(mediaType, season, episode) {
+  var output = [];
+  var seen = {};
+
+  function add(value) {
+    var text = String(value || "").trim();
+    var key = text.toLowerCase();
+    if (!text || seen[key]) return;
+    seen[key] = true;
+    output.push(text);
+  }
+
+  /*
+   * We already load the exact TMDB detail route, so do not waste clicks on
+   * homepage search/title cards. For TV, select season/episode first.
+   */
+  episodeInteractions(mediaType, season, episode).forEach(add);
+
+  [
+    "watch now",
+    "start watching",
+    "watch",
+    "play now",
+    "play",
+    "continue",
+    "server",
+    "change server",
+    "skip ad",
+    "skip",
+    "close ad",
+    "close"
+  ].forEach(add);
+
+  return output;
+}
+
+function runDirectRouteWebview(tmdbId, info, mediaType, season, episode, timeoutMs) {
+  var startUrl = detailRoute(tmdbId, mediaType);
+
   console.log(
-    "[CineMode] webview title='" + searchTitle + "' timeout=" + timeoutMs +
+    "[CineMode] direct-route webview=" + startUrl +
+    " timeout=" + timeoutMs +
     (mediaType === "tv" ? " S" + season + "E" + episode : "")
+  );
+
+  return globalThis.webviewResolve(startUrl, {
+    referer: BASE_URL + "/",
+    directLoad: true,
+    timeoutMs: timeoutMs,
+
+    /*
+     * The detail route is already the correct TMDB title. As soon as the
+     * first playable network request appears, give the player a short grace
+     * period and return instead of waiting for every mirror.
+     */
+    finishAfterFirstMs: 950,
+
+    suppressPopups: true,
+    lockMainFrameHost: true,
+
+    interactionTexts: directRouteInteractions(
+      mediaType,
+      season,
+      episode
+    ),
+
+    viewportWidth: 1080,
+    viewportHeight: 1080,
+    clickX: 540,
+    clickY: 540,
+
+    clickDelaysMs: [
+      500,
+      1050,
+      1700,
+      2500,
+      3500,
+      4700,
+      6000,
+      7100
+    ].filter(function(delay) {
+      return delay < timeoutMs;
+    }),
+
+    match: [
+      ".m3u8",
+      ".mp4",
+      ".m4v",
+      "/sora/",
+      "master.m3u8",
+      "manifest.m3u8",
+      "playlist.m3u8",
+      "mime=video",
+      "type=video"
+    ],
+
+    blocked: BLOCKED_PARTS,
+    injectAbyssHook: true
+  }).then(function(result) {
+    var streams =
+      result && Array.isArray(result.streams)
+        ? result.streams
+        : [];
+
+    console.log(
+      "[CineMode] direct-route captured=" +
+      streams.length
+    );
+
+    streams.slice(0, 4).forEach(function(item, index) {
+      var value = String(item && item.url || "");
+      var host = "";
+      try {
+        host = new URL(value).hostname;
+      } catch (_) {}
+
+      console.log(
+        "[CineMode] capture #" + (index + 1) +
+        " host=" + host +
+        " direct=" + DIRECT_EXT_RE.test(value) +
+        " sora=" + (value.toLowerCase().indexOf("/sora/") !== -1)
+      );
+    });
+
+    return streams;
+  }).catch(function(error) {
+    console.log(
+      "[CineMode] direct-route webview failed error=" +
+      (
+        error && error.message
+          ? error.message
+          : String(error)
+      )
+    );
+    return [];
+  });
+}
+
+function runHomepageFallback(searchTitle, info, mediaType, season, episode, timeoutMs) {
+  console.log(
+    "[CineMode] homepage fallback title='" +
+    searchTitle +
+    "' timeout=" +
+    timeoutMs
   );
 
   return globalThis.webviewResolve(BASE_URL + "/", {
@@ -694,26 +841,34 @@ function runWebview(searchTitle, info, mediaType, season, episode, timeoutMs) {
     directLoad: true,
     searchText: searchTitle,
     timeoutMs: timeoutMs,
-    finishAfterFirstMs: 850,
+    finishAfterFirstMs: 700,
     suppressPopups: true,
-    lockMainFrameHost: false,
-    interactionTexts: buildInteractionTexts(searchTitle, info, mediaType, season, episode),
+    lockMainFrameHost: true,
+    interactionTexts: buildInteractionTexts(
+      searchTitle,
+      info,
+      mediaType,
+      season,
+      episode
+    ),
     viewportWidth: 1080,
     viewportHeight: 1080,
     clickX: 540,
     clickY: 540,
-    clickDelaysMs: [500, 1000, 1650, 2500, 3500, 4700, 5900, 6900].filter(function(delay) {
+    clickDelaysMs: [350, 700, 1050].filter(function(delay) {
       return delay < timeoutMs;
     }),
-    match: [".m3u8", ".mp4", ".m4v", "/sora/", "/master", "/manifest", "/playlist", "/stream", "/video", "mime=video", "type=video"],
+    match: [".m3u8", ".mp4", ".m4v", "/sora/"],
     blocked: BLOCKED_PARTS,
     injectAbyssHook: true
   }).then(function(result) {
-    var streams = result && Array.isArray(result.streams) ? result.streams : [];
-    console.log("[CineMode] webview captured=" + streams.length);
+    var streams =
+      result && Array.isArray(result.streams)
+        ? result.streams
+        : [];
+    console.log("[CineMode] homepage captured=" + streams.length);
     return streams;
-  }).catch(function(error) {
-    console.log("[CineMode] webview failed error=" + (error && error.message ? error.message : String(error)));
+  }).catch(function() {
     return [];
   });
 }
@@ -758,16 +913,6 @@ function toStream(candidate, info, mediaType, season, episode) {
   };
 }
 
-function pickAlias(info) {
-  var primary = normalizeTitle(info && info.title);
-  var aliases = info && Array.isArray(info.aliases) ? info.aliases : [];
-  for (var i = 0; i < aliases.length; i += 1) {
-    var value = String(aliases[i] || "").trim();
-    if (value && normalizeTitle(value) !== primary) return value;
-  }
-  return "";
-}
-
 function getStreams(tmdbId, mediaType, season, episode) {
   var startedAt = Date.now();
   var type = mediaType === "tv" ? "tv" : "movie";
@@ -786,7 +931,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     if (!info.title) throw new Error("TMDB title is empty");
 
     console.log("[CineMode] title='" + info.title + "' year=" + info.year);
-    trace("SEARCH", { title: info.title, aliases: info.aliases.length, mode: "fast-first" });
+    trace("SEARCH", { title: info.title, aliases: info.aliases.length, mode: "direct-route-first" });
 
     return fastHttpDiscover(id, info, type, requestedSeason, requestedEpisode)
       .then(function(fastCandidates) {
@@ -796,50 +941,108 @@ function getStreams(tmdbId, mediaType, season, episode) {
             return [toStream(bestFast, info, type, requestedSeason, requestedEpisode)];
           }
 
-          console.log("[CineMode] fast-path no verified stream -> long WebView fallback");
+          console.log("[CineMode] fast-path shell only -> exact TMDB route WebView");
           if (!nativeAvailable()) return [];
 
           var elapsed = Date.now() - startedAt;
-          var remaining = PROVIDER_BUDGET_MS - elapsed - VERIFY_TIMEOUT_MS - 250;
-          if (remaining < 1200) return [];
+          var remaining =
+            PROVIDER_BUDGET_MS -
+            elapsed -
+            VERIFY_TIMEOUT_MS -
+            180;
 
-          var primaryTimeout = Math.min(PRIMARY_WEBVIEW_MS, remaining);
-          return runWebview(
-            info.title,
+          if (remaining < 1400) return [];
+
+          var routeTimeout =
+            Math.min(
+              PRIMARY_WEBVIEW_MS,
+              remaining
+            );
+
+          return runDirectRouteWebview(
+            id,
             info,
             type,
             requestedSeason,
             requestedEpisode,
-            primaryTimeout
-          ).then(function(captured) {
-            return verifyBestCandidate(capturedCandidates(captured), 3);
-          }).then(function(bestPrimary) {
-            if (bestPrimary) {
-              console.log("[CineMode] WEBVIEW HIT primary q=" + bestPrimary.quality);
-              return [toStream(bestPrimary, info, type, requestedSeason, requestedEpisode)];
-            }
+            routeTimeout
+          )
+            .then(function(captured) {
+              return verifyBestCandidate(
+                capturedCandidates(captured),
+                3
+              );
+            })
+            .then(function(bestRoute) {
+              if (bestRoute) {
+                console.log(
+                  "[CineMode] DIRECT ROUTE HIT q=" +
+                  bestRoute.quality
+                );
 
-            var alias = pickAlias(info);
-            var left = PROVIDER_BUDGET_MS - (Date.now() - startedAt) - VERIFY_TIMEOUT_MS - 200;
-            if (!alias || left < 1200) return [];
+                return [
+                  toStream(
+                    bestRoute,
+                    info,
+                    type,
+                    requestedSeason,
+                    requestedEpisode
+                  )
+                ];
+              }
 
-            var aliasTimeout = Math.min(ALIAS_WEBVIEW_MS, left);
-            console.log("[CineMode] alias fallback='" + alias + "'");
-            return runWebview(
-              alias,
-              info,
-              type,
-              requestedSeason,
-              requestedEpisode,
-              aliasTimeout
-            ).then(function(aliasCaptured) {
-              return verifyBestCandidate(capturedCandidates(aliasCaptured), 2);
-            }).then(function(bestAlias) {
-              if (!bestAlias) return [];
-              console.log("[CineMode] WEBVIEW HIT alias q=" + bestAlias.quality);
-              return [toStream(bestAlias, info, type, requestedSeason, requestedEpisode)];
+              /*
+               * Homepage search is no longer the normal path. Only try it
+               * when the direct detail WebView returned early and there is
+               * still enough budget left.
+               */
+              var left =
+                PROVIDER_BUDGET_MS -
+                (Date.now() - startedAt) -
+                VERIFY_TIMEOUT_MS -
+                150;
+
+              if (left < 900) return [];
+
+              var fallbackTimeout =
+                Math.min(
+                  HOME_FALLBACK_MS,
+                  left
+                );
+
+              return runHomepageFallback(
+                info.title,
+                info,
+                type,
+                requestedSeason,
+                requestedEpisode,
+                fallbackTimeout
+              )
+                .then(function(homeCaptured) {
+                  return verifyBestCandidate(
+                    capturedCandidates(homeCaptured),
+                    2
+                  );
+                })
+                .then(function(bestHome) {
+                  if (!bestHome) return [];
+
+                  console.log(
+                    "[CineMode] HOME FALLBACK HIT q=" +
+                    bestHome.quality
+                  );
+
+                  return [
+                    toStream(
+                      bestHome,
+                      info,
+                      type,
+                      requestedSeason,
+                      requestedEpisode
+                    )
+                  ];
+                });
             });
-          });
         });
       });
   });

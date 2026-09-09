@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.0.5";
+var VERSION = "2.0.6";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -13,7 +13,7 @@ var BUDGET_MS = 8200;
 var PAGE_TIMEOUT_MS = 1500;
 var BUNDLE_TIMEOUT_MS = 1350;
 var ROUTE_WEBVIEW_MS = 3900;
-var PLAYER_WEBVIEW_MS = 4200;
+var PLAYER_WEBVIEW_MS = 5200;
 var VERIFY_MS = 900;
 
 var MEDIA_RE = /\.(?:m3u8|mp4|m4v|webm)(?:$|[?#])/i;
@@ -68,6 +68,7 @@ var ZXC_MATCH = [
   ".mp4",
   ".m4v",
   ".webm",
+  "/backend_/sources/",
   "/api/",
   "/source",
   "/sources",
@@ -526,7 +527,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
     referer: playerStage ? BASE + "/" : BASE + "/",
     directLoad: true,
     timeoutMs: timeoutMs,
-    finishAfterFirstMs: playerStage ? 2700 : 850,
+    finishAfterFirstMs: playerStage ? 3000 : 850,
 
     /*
      * CineMode is ad-supported and its watch action can navigate away from
@@ -545,7 +546,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
       ? [350, 850, 1450, 2200, 2850]
       : [450, 950, 1550, 2350, 3200],
 
-    match: playerStage && isZxc(startUrl) ? ["https://"] : PLAYER_HINTS,
+    match: playerStage && isZxc(startUrl) ? ZXC_MATCH : PLAYER_HINTS,
     blocked: BLOCKED,
     injectAbyssHook: true
   }).then(function(result) {
@@ -1175,7 +1176,7 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
             : "")
         );
 
-        return verifyFirst(parsed.direct, 6).then(function(hit) {
+        return verifyFirst(parsed.direct, 8).then(function(hit) {
           if (hit) return hit;
 
           return verifyFirst(parsed.session, 8).then(function(sessionHit) {
@@ -1187,17 +1188,14 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
               return sessionHit;
             }
 
-            /*
-             * Replay is fallback only. ZXC source endpoints are protected,
-             * so the browser session is preferred whenever possible.
-             */
-            return resolveCapturedEndpoints(
-              parsed.endpoints,
-              tmdbId,
-              type,
-              season,
-              episode
-            );
+            if (parsed.endpoints.length) {
+              console.log(
+                "[CineMode] protected source captured=" +
+                parsed.endpoints.length +
+                " but no downstream media captured"
+              );
+            }
+            return null;
           });
         });
       });

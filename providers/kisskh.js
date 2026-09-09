@@ -1,14 +1,13 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.6";
+var VERSION = "1.0.7";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
 var KISSKH_VERSION = "2.8.10";
 var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 var VIDEO_KEY_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id=";
-var FAST_VIDEO_KEY_API = "https://enc-dec.app/api/enc-kisskh?type=vid&text=";
 
 var USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 var DEFAULT_HEADERS = {
@@ -194,48 +193,92 @@ function isDirectStream(url) {
 }
 
 function getTmdbInfo(tmdbId, mediaType) {
+  var started = Date.now();
   var endpoint = mediaType === "movie" ? "movie" : "tv";
   var url = "https://api.themoviedb.org/3/" + endpoint + "/" + encodeURIComponent(tmdbId) +
     "?api_key=" + TMDB_API_KEY +
     "&append_to_response=alternative_titles,translations,external_ids";
 
+  function parseContext(raw) {
+    if (!raw) return null;
+    if (typeof raw === "string") {
+      try { return JSON.parse(raw); } catch (_) { return null; }
+    }
+    return typeof raw === "object" ? raw : null;
+  }
+
   function normalizeData(data, context) {
+    data = data || {};
+    context = context || {};
     return {
-      title: data.title || data.name || context && context.title || "",
-      originalTitle: data.original_title || data.original_name || context && context.originalTitle || "",
+      title: data.title || data.name || context.title || "",
+      originalTitle: data.original_title || data.original_name || context.originalTitle || "",
       year: String(
         data.release_date ||
         data.first_air_date ||
-        context && context.year ||
+        context.year ||
         ""
       ).split("-")[0],
       aliases: uniqueText(
         collectTmdbAliases(data, mediaType).concat(
-          context && Array.isArray(context.aliases) ? context.aliases : []
+          Array.isArray(context.aliases) ? context.aliases : []
         )
       )
     };
   }
 
-  if (
-    typeof globalThis !== "undefined" &&
-    typeof globalThis.vueoDiscoveryContext === "function"
-  ) {
-    return Promise.resolve(globalThis.vueoDiscoveryContext(url))
-      .then(function(context) {
-        if (context && context.tmdb) {
-          return normalizeData(context.tmdb, context);
-        }
-        throw new Error("shared metadata unavailable");
-      })
-      .catch(function() {
-        return fetchJson(url, {}).then(function(data) {
-          return normalizeData(data, null);
-        });
-      });
-  }
+  try {
+    if (typeof globalThis !== "undefined") {
+      var directContext = parseContext(globalThis.VUEO_DISCOVERY_CONTEXT);
+      if (directContext) {
+        var directTmdb = directContext.tmdb && typeof directContext.tmdb === "object"
+          ? directContext.tmdb
+          : {
+              title: mediaType === "movie" ? directContext.title : undefined,
+              name: mediaType === "tv" ? directContext.title : undefined,
+              original_title: mediaType === "movie" ? directContext.originalTitle : undefined,
+              original_name: mediaType === "tv" ? directContext.originalTitle : undefined,
+              release_date: mediaType === "movie" && directContext.year
+                ? String(directContext.year) + "-01-01" : "",
+              first_air_date: mediaType === "tv" && directContext.year
+                ? String(directContext.year) + "-01-01" : ""
+            };
 
+        console.log("[KissKH] metadata=shared-direct elapsed=" +
+          (Date.now() - started) + "ms");
+        return Promise.resolve(normalizeData(directTmdb, directContext));
+      }
+
+      if (typeof globalThis.vueoDiscoveryContext === "function") {
+        return Promise.resolve(globalThis.vueoDiscoveryContext(url))
+          .then(function(context) {
+            context = parseContext(context);
+            if (context) {
+              var data = context.tmdb && typeof context.tmdb === "object"
+                ? context.tmdb
+                : {};
+              console.log("[KissKH] metadata=shared-fn elapsed=" +
+                (Date.now() - started) + "ms");
+              return normalizeData(data, context);
+            }
+            throw new Error("shared metadata unavailable");
+          })
+          .catch(function() {
+            var tmdbStarted = Date.now();
+            return fetchJson(url, {}).then(function(data) {
+              console.log("[KissKH] metadata=tmdb elapsed=" +
+                (Date.now() - tmdbStarted) + "ms");
+              return normalizeData(data, null);
+            });
+          });
+      }
+    }
+  } catch (_) {}
+
+  var tmdbStarted = Date.now();
   return fetchJson(url, {}).then(function(data) {
+    console.log("[KissKH] metadata=tmdb elapsed=" +
+      (Date.now() - tmdbStarted) + "ms");
     return normalizeData(data, null);
   });
 }
@@ -243,9 +286,11 @@ function getTmdbInfo(tmdbId, mediaType) {
 function searchKissKh(baseUrl, query) {
   var base = String(baseUrl || PRIMARY_BASE_URL).replace(/\/+$/, "");
   var url = base + "/api/DramaList/Search?q=" + encodeURIComponent(query) + "&type=0";
+  var started = Date.now();
   return fetchJson(url, headersFor(base, {})).then(function(data) {
     var rows = Array.isArray(data) ? data : [];
-    console.log("[KissKH] search host=" + base + " query='" + query + "' items=" + rows.length);
+    console.log("[KissKH] search host=" + base + " query='" + query +
+      "' items=" + rows.length + " elapsed=" + (Date.now() - started) + "ms");
     return rows;
   });
 }
@@ -253,8 +298,11 @@ function searchKissKh(baseUrl, query) {
 function getDramaDetail(baseUrl, id) {
   var base = String(baseUrl || PRIMARY_BASE_URL).replace(/\/+$/, "");
   var url = base + "/api/DramaList/Drama/" + encodeURIComponent(id) + "?isq=false";
+  var started = Date.now();
   return fetchJson(url, headersFor(base, {})).then(function(detail) {
     if (detail && typeof detail === "object") detail.__baseUrl = base;
+    console.log("[KissKH] detail id=" + id + " elapsed=" +
+      (Date.now() - started) + "ms");
     return detail;
   });
 }
@@ -502,38 +550,29 @@ function selectEpisode(detail, mediaType, season, episode) {
 }
 
 function getVideoKey(episodeId) {
-  var fastUrl = FAST_VIDEO_KEY_API + encodeURIComponent(episodeId);
+  var url = VIDEO_KEY_API + encodeURIComponent(episodeId) +
+    "&version=" + encodeURIComponent(KISSKH_VERSION);
   var started = Date.now();
-
-  return fetchJson(fastUrl, {})
-    .then(function(data) {
-      var key = data && (data.result || data.key);
-      if (!key) throw new Error("Empty fast KissKH video key");
-      console.log("[KissKH] video key=fast elapsed=" + (Date.now() - started) + "ms");
-      return key;
-    })
-    .catch(function() {
-      var fallbackStarted = Date.now();
-      var url = VIDEO_KEY_API + encodeURIComponent(episodeId) +
-        "&version=" + encodeURIComponent(KISSKH_VERSION);
-
-      return fetchJson(url, {}).then(function(data) {
-        if (!data || !data.key) throw new Error("Empty KissKH video key");
-        console.log("[KissKH] video key=fallback elapsed=" +
-          (Date.now() - fallbackStarted) + "ms");
-        return data.key;
-      });
-    });
+  return fetchJson(url, {}).then(function(data) {
+    if (!data || !data.key) throw new Error("Empty KissKH video key");
+    console.log("[KissKH] video key=stable elapsed=" +
+      (Date.now() - started) + "ms");
+    return data.key;
+  });
 }
 
 function getSources(episodeId, key) {
   var base = String(BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "");
   var url = base + "/api/DramaList/Episode/" + encodeURIComponent(episodeId) +
     ".png?err=false&ts=&time=&kkey=" + encodeURIComponent(key);
+  var started = Date.now();
   return fetchJson(url, headersFor(base, {
     "Origin": base,
     "Referer": base + "/"
-  }));
+  })).then(function(data) {
+    console.log("[KissKH] sources elapsed=" + (Date.now() - started) + "ms");
+    return data;
+  });
 }
 
 function buildStreams(source, info, season, episode) {

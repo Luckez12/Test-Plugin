@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "CineMode";
-var VERSION = "1.0.0";
+var VERSION = "1.0.1";
 var BASE_URL = "https://cinemode.fun";
 var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -10,13 +10,14 @@ var USER_AGENT =
   "(KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
 /* Keep the whole provider below VUEO's ~10s scan timeout. */
-var PROVIDER_BUDGET_MS = 8800;
-var FAST_PATH_BUDGET_MS = 2100;
-var PRIMARY_WEBVIEW_MS = 4300;
-var ALIAS_WEBVIEW_MS = 1700;
-var VERIFY_TIMEOUT_MS = 900;
+var PROVIDER_BUDGET_MS = 9300;
+var FAST_PATH_BUDGET_MS = 950;
+var PRIMARY_WEBVIEW_MS = 7350;
+var ALIAS_WEBVIEW_MS = 1200;
+var VERIFY_TIMEOUT_MS = 700;
 
 var DIRECT_EXT_RE = /\.(m3u8|mp4|m4v)(?:$|[?#])/i;
+var STREAM_HINT_RE = /(?:\/master(?:[/?#]|$)|\/manifest(?:[/?#]|$)|\/playlist(?:[/?#]|$)|\/stream(?:[/?#]|$)|\/video(?:[/?#]|$)|[?&](?:mime|type)=video(?:[&#]|$))/i;
 var BLOCKED_PARTS = [
   "googletagmanager",
   "doubleclick",
@@ -204,6 +205,11 @@ function absoluteUrl(value, base) {
     if (text.charAt(0) === "/") return BASE_URL + text;
     return "";
   }
+}
+
+function isPotentialStreamUrl(url) {
+  var value = String(url || "");
+  return DIRECT_EXT_RE.test(value) || STREAM_HINT_RE.test(value);
 }
 
 function isBlockedUrl(url) {
@@ -438,15 +444,15 @@ function verifyCandidate(candidate, timeoutMs) {
         return { ok: false, status: response.status, total: total, contentType: contentType };
       }
 
-      if (isHls) {
-        if (
-          contentType.indexOf("mpegurl") !== -1 ||
-          contentType.indexOf("application/vnd.apple") !== -1 ||
-          contentType.indexOf("application/x-mpegurl") !== -1
-        ) {
+      var hlsType =
+        contentType.indexOf("mpegurl") !== -1 ||
+        contentType.indexOf("application/vnd.apple") !== -1 ||
+        contentType.indexOf("application/x-mpegurl") !== -1;
+
+      if (isHls || hlsType) {
+        if (hlsType) {
           return { ok: true, status: response.status, total: total, contentType: contentType };
         }
-
         return response.text().then(function(text) {
           return {
             ok: String(text || "").indexOf("#EXTM3U") !== -1,
@@ -459,7 +465,9 @@ function verifyCandidate(candidate, timeoutMs) {
         });
       }
 
-      var videoType = contentType.indexOf("video/") === 0 || contentType.indexOf("octet-stream") !== -1;
+      var videoType =
+        contentType.indexOf("video/") === 0 ||
+        contentType.indexOf("octet-stream") !== -1;
       var sizeOk = total === 0 || total > 2 * 1024 * 1024;
       return {
         ok: videoType && sizeOk,
@@ -481,7 +489,7 @@ function verifyBestCandidate(candidates, limit) {
 
   list = list.filter(function(item) {
     var url = String(item && item.url || "");
-    if (!url || seen[url] || !DIRECT_EXT_RE.test(url)) return false;
+    if (!url || seen[url] || !isPotentialStreamUrl(url)) return false;
     seen[url] = true;
     item.quality = item.quality || inferQuality(item.url, item.label);
     return true;
@@ -527,8 +535,7 @@ function guessedDetailUrls(tmdbId, mediaType, season, episode) {
 function fastHttpDiscover(tmdbId, info, mediaType, season, episode) {
   var title = encodeURIComponent(info.title);
   var probes = guessedDetailUrls(tmdbId, mediaType, season, episode).concat([
-    BASE_URL + "/search?q=" + title,
-    BASE_URL + "/?s=" + title
+    BASE_URL + "/search?q=" + title
   ]);
 
   console.log("[CineMode] fast-path probes=" + probes.length);
@@ -662,6 +669,8 @@ function buildInteractionTexts(searchTitle, info, mediaType, season, episode) {
     output.push(text);
   }
 
+  add("search");
+  add("find");
   add(searchTitle);
   add(info.title);
   add(info.originalTitle);
@@ -685,18 +694,18 @@ function runWebview(searchTitle, info, mediaType, season, episode, timeoutMs) {
     directLoad: true,
     searchText: searchTitle,
     timeoutMs: timeoutMs,
-    finishAfterFirstMs: 450,
+    finishAfterFirstMs: 850,
     suppressPopups: true,
-    lockMainFrameHost: true,
+    lockMainFrameHost: false,
     interactionTexts: buildInteractionTexts(searchTitle, info, mediaType, season, episode),
     viewportWidth: 1080,
     viewportHeight: 1080,
     clickX: 540,
     clickY: 540,
-    clickDelaysMs: [450, 900, 1500, 2200, 3000, 3900].filter(function(delay) {
+    clickDelaysMs: [500, 1000, 1650, 2500, 3500, 4700, 5900, 6900].filter(function(delay) {
       return delay < timeoutMs;
     }),
-    match: [".m3u8", ".mp4", ".m4v", "/sora/"],
+    match: [".m3u8", ".mp4", ".m4v", "/sora/", "/master", "/manifest", "/playlist", "/stream", "/video", "mime=video", "type=video"],
     blocked: BLOCKED_PARTS,
     injectAbyssHook: true
   }).then(function(result) {
@@ -717,7 +726,8 @@ function capturedCandidates(captured) {
     if (!item || !item.url) return;
     var url = String(item.url).trim();
     /* /sora/ is intermediate. Never expose it as a playable source. */
-    if (!DIRECT_EXT_RE.test(url) || seen[url]) return;
+    if (url.toLowerCase().indexOf("/sora/") !== -1) return;
+    if (!isPotentialStreamUrl(url) || seen[url]) return;
     seen[url] = true;
 
     var referer = String(item.referer || item.referrer || "").trim() || BASE_URL + "/";
@@ -786,7 +796,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
             return [toStream(bestFast, info, type, requestedSeason, requestedEpisode)];
           }
 
-          console.log("[CineMode] fast-path no verified stream -> WebView fallback");
+          console.log("[CineMode] fast-path no verified stream -> long WebView fallback");
           if (!nativeAvailable()) return [];
 
           var elapsed = Date.now() - startedAt;

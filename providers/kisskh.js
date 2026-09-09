@@ -1,13 +1,14 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.5";
+var VERSION = "1.0.6";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
 var KISSKH_VERSION = "2.8.10";
 var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 var VIDEO_KEY_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id=";
+var FAST_VIDEO_KEY_API = "https://enc-dec.app/api/enc-kisskh?type=vid&text=";
 
 var USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 var DEFAULT_HEADERS = {
@@ -501,11 +502,28 @@ function selectEpisode(detail, mediaType, season, episode) {
 }
 
 function getVideoKey(episodeId) {
-  var url = VIDEO_KEY_API + encodeURIComponent(episodeId) + "&version=" + encodeURIComponent(KISSKH_VERSION);
-  return fetchJson(url, {}).then(function(data) {
-    if (!data || !data.key) throw new Error("Empty KissKH video key");
-    return data.key;
-  });
+  var fastUrl = FAST_VIDEO_KEY_API + encodeURIComponent(episodeId);
+  var started = Date.now();
+
+  return fetchJson(fastUrl, {})
+    .then(function(data) {
+      var key = data && (data.result || data.key);
+      if (!key) throw new Error("Empty fast KissKH video key");
+      console.log("[KissKH] video key=fast elapsed=" + (Date.now() - started) + "ms");
+      return key;
+    })
+    .catch(function() {
+      var fallbackStarted = Date.now();
+      var url = VIDEO_KEY_API + encodeURIComponent(episodeId) +
+        "&version=" + encodeURIComponent(KISSKH_VERSION);
+
+      return fetchJson(url, {}).then(function(data) {
+        if (!data || !data.key) throw new Error("Empty KissKH video key");
+        console.log("[KissKH] video key=fallback elapsed=" +
+          (Date.now() - fallbackStarted) + "ms");
+        return data.key;
+      });
+    });
 }
 
 function getSources(episodeId, key) {
@@ -550,6 +568,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     (type === "tv" ? " S" + (season || 1) + "E" + (episode || 1) : ""));
 
   var info;
+  var requestStarted = Date.now();
   return getTmdbInfo(tmdbId, type)
     .then(function(value) {
       info = value;
@@ -566,7 +585,8 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function(source) {
       var streams = buildStreams(source, info, type === "tv" ? season || 1 : null, type === "tv" ? episode || 1 : null);
-      console.log("[KissKH] Direct streams found=" + streams.length);
+      console.log("[KissKH] Direct streams found=" + streams.length +
+        " elapsed=" + (Date.now() - requestStarted) + "ms");
       return streams;
     })
     .catch(function(error) {

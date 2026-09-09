@@ -1,10 +1,11 @@
 "use strict";
 
 var PROVIDER = "HDHub4u";
-var VERSION = "1.0.2";
+var VERSION = "1.1.0";
 var PRIMARY_BASE = "https://new5.hdhub4u.cl";
 var FALLBACK_BASES = ["https://hdhub4u.frl"];
 var DOMAINS_URL = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/domains.json";
+var SEARCH_BASE = "https://search.hdhub4u.glass/collections/post/documents/search";
 var TMDB_BASE = "https://api.themoviedb.org/3";
 var TMDB_API_KEY = "439c478a771f35c05022f9feabcca01c";
 var UA = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
@@ -299,6 +300,63 @@ function bestSearchResult(items, info, mediaType, season) {
   return best;
 }
 
+
+function rewriteHdhubUrl(url, base) {
+  var raw = String(url || "").trim();
+  if (!raw) return "";
+  if (raw.charAt(0) === "/") return String(base || PRIMARY_BASE).replace(/\/+$/, "") + raw;
+  if (!/^https?:\/\//i.test(raw)) return absoluteUrl(base || PRIMARY_BASE, raw);
+  try {
+    var u = new URL(raw);
+    if (/hdhub4u\./i.test(u.hostname)) {
+      var b = new URL(base || PRIMARY_BASE);
+      u.protocol = b.protocol;
+      u.hostname = b.hostname;
+      u.port = b.port;
+      return u.toString();
+    }
+  } catch (_) {}
+  return raw;
+}
+
+function searchApi(base, query, info, mediaType, season) {
+  var url = SEARCH_BASE +
+    "?q=" + encodeURIComponent(query) +
+    "&query_by=post_title,category" +
+    "&query_by_weights=4,2" +
+    "&sort_by=sort_by_date:desc" +
+    "&limit=15" +
+    "&highlight_fields=none" +
+    "&use_cache=true" +
+    "&page=1";
+
+  return fetchJson(url, {
+    headers: {
+      "Accept": "application/json",
+      "Referer": String(base || PRIMARY_BASE) + "/"
+    }
+  }, 1700).then(function(data) {
+    var hits = data && Array.isArray(data.hits) ? data.hits : [];
+    var items = hits.map(function(hit) {
+      var d = hit && hit.document ? hit.document : {};
+      var title = String(d.post_title || d.title || "").replace(/\s+/g, " ").trim();
+      return {
+        title: title,
+        url: rewriteHdhubUrl(d.permalink || d.url || "", base),
+        year: parseYear(title)
+      };
+    }).filter(function(x) { return x.title && x.url; });
+
+    var best = bestSearchResult(items, info, mediaType, season);
+    console.log(
+      "[HDHub4u] search-api query='" + query +
+      "' items=" + items.length +
+      " match=" + (best ? "yes" : "no")
+    );
+    return best ? { base: base, item: best } : null;
+  });
+}
+
 function searchOne(base, query, info, mediaType, season) {
   var url = base + "/?s=" + encodeURIComponent(query);
   return fetchText(url, { headers: { "Referer": base + "/" } }, 2200).then(function(x) {
@@ -310,30 +368,38 @@ function searchOne(base, query, info, mediaType, season) {
 }
 
 function findDetail(info, mediaType, season) {
-  var primaryQueries = unique([info.title].concat((info.aliases || []).slice(0, 1)));
-  var bases = unique([PRIMARY_BASE].concat(FALLBACK_BASES));
+  var queries = unique([info.title].concat((info.aliases || []).slice(0, 1)));
+  var base = PRIMARY_BASE;
 
-  function tryBases(bi) {
-    if (bi >= bases.length) return Promise.resolve(null);
-    var base = bases[bi];
-    function tryQuery(qi) {
-      if (qi >= primaryQueries.length) return tryBases(bi + 1);
-      return searchOne(base, primaryQueries[qi], info, mediaType, season).then(function(hit) {
-        return hit || tryQuery(qi + 1);
-      }).catch(function(e) {
-        console.log("[HDHub4u] search fail host=" + base + " error=" + (e && e.message ? e.message : String(e)));
-        return tryQuery(qi + 1);
-      });
-    }
-    return tryQuery(0);
+  function tryApi(i) {
+    if (i >= queries.length) return Promise.resolve(null);
+    return searchApi(base, queries[i], info, mediaType, season).then(function(hit) {
+      return hit || tryApi(i + 1);
+    }).catch(function() {
+      return tryApi(i + 1);
+    });
   }
 
-  return tryBases(0).then(function(hit) {
+  return tryApi(0).then(function(hit) {
     if (hit) return hit;
-    console.log("[HDHub4u] primary domains missed -> refresh domain once");
-    return discoverCurrentBase().then(function(base) {
-      if (!base || bases.indexOf(base) >= 0) return null;
-      return searchOne(base, info.title, info, mediaType, season).catch(function() { return null; });
+
+    console.log("[HDHub4u] search API missed -> website search fallback");
+    return searchOne(base, info.title, info, mediaType, season).catch(function() {
+      return null;
+    });
+  }).then(function(hit) {
+    if (hit) return hit;
+
+    console.log("[HDHub4u] primary domain missed -> refresh domain once");
+    return discoverCurrentBase().then(function(current) {
+      if (!current) return null;
+      return searchApi(current, info.title, info, mediaType, season).then(function(apiHit) {
+        return apiHit || searchOne(current, info.title, info, mediaType, season);
+      }).catch(function() {
+        return searchOne(current, info.title, info, mediaType, season).catch(function() {
+          return null;
+        });
+      });
     });
   });
 }
@@ -665,16 +731,376 @@ function serverScore(url, label) {
   return 300;
 }
 
+
+function hlsHeaders(referer, origin) {
+  var h = {
+    "User-Agent": UA,
+    "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+    "Referer": referer || ""
+  };
+  if (origin) h["Origin"] = origin;
+  return h;
+}
+
+function normalizeEscapedUrl(value) {
+  var s = String(value || "").trim();
+  if (!s) return "";
+  s = s.replace(/\\u0026/gi, "&")
+       .replace(/\\u003d/gi, "=")
+       .replace(/\\u002f/gi, "/")
+       .replace(/\\\//g, "/")
+       .replace(/&amp;/gi, "&");
+  try { s = JSON.parse('"' + s.replace(/"/g, '\\"') + '"'); } catch (_) {}
+  return s;
+}
+
+function verifyHls(url, referer, extraHeaders) {
+  url = normalizeEscapedUrl(url);
+  if (!/^https?:\/\//i.test(url)) return Promise.resolve(null);
+
+  var origin = "";
+  try { origin = new URL(referer || url).origin; } catch (_) {}
+  var headers = hlsHeaders(referer, origin);
+  Object.keys(extraHeaders || {}).forEach(function(k) { headers[k] = extraHeaders[k]; });
+
+  return fetchText(url, { headers: headers, redirect: "follow" }, 1650).then(function(x) {
+    var body = String(x.text || "");
+    var ct = headerGet({ headers: x.headers }, "content-type").toLowerCase();
+    var finalUrl = String(x.url || url);
+    var ok = /#EXTM3U/i.test(body) || /mpegurl/i.test(ct);
+    if (!ok) {
+      console.log("[HDHub4u] HLS reject host=" + hostOf(finalUrl) + " ct=" + (ct || "?"));
+      return null;
+    }
+    console.log("[HDHub4u] HLS verified host=" + hostOf(finalUrl));
+    return {
+      url: finalUrl,
+      referer: referer || "",
+      headers: headers,
+      isHls: true,
+      quality: 1080
+    };
+  }).catch(function() {
+    return null;
+  });
+}
+
+function unbasePacker(word, radix) {
+  var alphabet62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  var alphabet95 = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+  var alphabet = null;
+  if (radix > 36) {
+    if (radix <= 62) alphabet = alphabet62.substring(0, radix);
+    else if (radix <= 95) alphabet = alphabet95.substring(0, radix);
+  }
+  if (!alphabet) {
+    var n = parseInt(word, radix);
+    return isNaN(n) ? -1 : n;
+  }
+  var out = 0;
+  for (var i = 0; i < word.length; i++) {
+    var p = alphabet.indexOf(word.charAt(i));
+    if (p < 0) return -1;
+    out = out * radix + p;
+  }
+  return out;
+}
+
+function unpackPacker(js) {
+  var raw = String(js || "");
+  if (!/eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k/i.test(raw)) return "";
+  var m = raw.match(/\}\s*\('([\s\S]*)',\s*(\d+)\s*,\s*(\d+)\s*,\s*'([\s\S]*?)'\.split\('\|'\)/);
+  if (!m) {
+    m = raw.match(/\}\s*\("([\s\S]*)",\s*(\d+)\s*,\s*(\d+)\s*,\s*"([\s\S]*?)"\.split\("\|"\)/);
+  }
+  if (!m) return "";
+
+  var payload = String(m[1] || "").replace(/\\'/g, "'");
+  var radix = Number(m[2] || 36);
+  var count = Number(m[3] || 0);
+  var symtab = String(m[4] || "").split("|");
+  if (!count || symtab.length < count) return "";
+
+  return payload.replace(/\b[a-zA-Z0-9_]+\b/g, function(word) {
+    var n = unbasePacker(word, radix);
+    return n >= 0 && n < symtab.length && symtab[n] ? symtab[n] : word;
+  });
+}
+
+function extractHlsUrls(text, base) {
+  var raw = String(text || "");
+  var sources = [];
+  var seen = Object.create(null);
+
+  function add(v) {
+    var u = normalizeEscapedUrl(v);
+    if (!u) return;
+    if (/^\/\//.test(u)) u = "https:" + u;
+    if (/^\//.test(u)) u = absoluteUrl(base, u);
+    if (!/^https?:\/\//i.test(u)) return;
+    if (!/\.m3u8(?:$|[?#])/i.test(u) && !/m3u8/i.test(u)) return;
+    if (seen[u]) return;
+    seen[u] = true;
+    sources.push(u);
+  }
+
+  var patterns = [
+    /(?:file|source|src)\s*[:=]\s*["']([^"']+)["']/gi,
+    /["'](https?:\\?\/\\?\/[^"']+?m3u8[^"']*)["']/gi,
+    /(https?:\/\/[^\s"'<>]+?\.m3u8[^\s"'<>]*)/gi
+  ];
+
+  patterns.forEach(function(rex) {
+    var m;
+    while ((m = rex.exec(raw)) !== null) add(m[1]);
+  });
+  return sources;
+}
+
+function resolveHdstream4u(url, referer) {
+  var input = String(url || "");
+  var embed = input
+    .replace("/download/", "/v/")
+    .replace("/file/", "/v/")
+    .replace("/embed/", "/v/")
+    .replace("/d/", "/v/")
+    .replace("/f/", "/v/");
+
+  console.log("[HDHub4u] try WATCH host=" + hostOf(input));
+
+  return fetchText(embed, {
+    headers: {
+      "Referer": referer || "",
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "cross-site"
+    }
+  }, 1900).then(function(x) {
+    var raw = String(x.text || "");
+    var scripts = [];
+    var $ = cheerio().load(raw);
+    $("script").each(function(_, el) {
+      var t = String($(el).html() || "");
+      if (t) scripts.push(t);
+    });
+
+    var joined = scripts.join("\n");
+    var unpacked = unpackPacker(joined);
+    var candidates = extractHlsUrls(unpacked || joined, x.url);
+
+    if (!candidates.length && unpacked) {
+      candidates = extractHlsUrls(joined, x.url);
+    }
+
+    console.log("[HDHub4u] WATCH HLS candidates=" + candidates.length);
+
+    function next(i) {
+      if (i >= candidates.length || i >= 3) return Promise.resolve(null);
+      var origin = originOf(x.url);
+      return verifyHls(candidates[i], x.url, {
+        "Origin": origin,
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "cross-site"
+      }).then(function(hit) {
+        if (hit) {
+          hit.label = "WATCH";
+          hit.quality = 1080;
+          return hit;
+        }
+        return next(i + 1);
+      });
+    }
+    return next(0);
+  }).catch(function(e) {
+    console.log("[HDHub4u] WATCH fail=" + (e && e.message ? e.message : String(e)));
+    return null;
+  });
+}
+
+function getCryptoJS() {
+  return require("crypto-js");
+}
+
+function resolveHubstream(url, referer) {
+  var rawUrl = String(url || "");
+  var hash = "";
+  try {
+    var u = new URL(rawUrl);
+    hash = String(u.hash || "").replace(/^#/, "");
+    if (!hash) {
+      var parts = u.pathname.split("/").filter(Boolean);
+      hash = parts.length ? parts[parts.length - 1] : "";
+    }
+  } catch (_) {
+    hash = rawUrl.split("#").pop().split("/").pop();
+  }
+
+  if (!hash) return Promise.resolve(null);
+
+  var base = originOf(rawUrl) || "https://hubstream.art";
+  var api = base + "/api/v1/video?id=" + encodeURIComponent(hash);
+  console.log("[HDHub4u] try PLAYER-2 host=" + hostOf(rawUrl) + " id=" + hash.slice(0, 8));
+
+  return fetchText(api, {
+    headers: {
+      "Accept": "text/plain,*/*",
+      "Referer": rawUrl,
+      "Origin": base
+    }
+  }, 1700).then(function(x) {
+    var encoded = String(x.text || "").trim();
+    if (!/^[0-9a-f]+$/i.test(encoded) || encoded.length < 32) return null;
+
+    var CryptoJS = getCryptoJS();
+    var key = CryptoJS.enc.Utf8.parse("kiemtienmua911ca");
+    var ivs = ["1234567890oiuytr", "0123456789abcdef"];
+
+    function decryptAt(i) {
+      if (i >= ivs.length) return Promise.resolve(null);
+      try {
+        var iv = CryptoJS.enc.Utf8.parse(ivs[i]);
+        var dec = CryptoJS.AES.decrypt(
+          { ciphertext: CryptoJS.enc.Hex.parse(encoded) },
+          key,
+          { iv: iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7 }
+        );
+        var text = dec.toString(CryptoJS.enc.Utf8);
+        var m = text && text.match(/"source"\s*:\s*"([^"]+)"/i);
+        var source = m ? normalizeEscapedUrl(m[1]) : "";
+        if (!source) return decryptAt(i + 1);
+
+        var tries = [source];
+        if (/^http:\/\//i.test(source)) tries.push(source.replace(/^http:/i, "https:"));
+
+        function verifyAt(j) {
+          if (j >= tries.length) return decryptAt(i + 1);
+          return verifyHls(tries[j], rawUrl, {
+            "Origin": base,
+            "Referer": rawUrl
+          }).then(function(hit) {
+            if (hit) {
+              hit.label = "PLAYER-2";
+              hit.quality = 1080;
+              return hit;
+            }
+            return verifyAt(j + 1);
+          });
+        }
+        return verifyAt(0);
+      } catch (_) {
+        return decryptAt(i + 1);
+      }
+    }
+
+    return decryptAt(0);
+  }).catch(function(e) {
+    console.log("[HDHub4u] PLAYER-2 fail=" + (e && e.message ? e.message : String(e)));
+    return null;
+  });
+}
+
+function siteStreamLinks(html, detailUrl) {
+  var $ = cheerio().load(String(html || ""));
+  var out = [];
+  var seen = Object.create(null);
+  var counts = { watch: 0, player2: 0, hubcdn: 0 };
+
+  $("a[href]").each(function(_, el) {
+    var a = $(el);
+    var href = absoluteUrl(detailUrl, a.attr("href"));
+    var label = String(a.text() || a.parent().text() || "").replace(/\s+/g, " ").trim();
+    if (!href || seen[href]) return;
+
+    var host = hostOf(href);
+    var kind = "";
+    var priority = 0;
+    var q = qualityNumber(label) || 1080;
+
+    if (/hubstream|vidstack/i.test(host)) {
+      kind = "player2";
+      priority = 1300;
+      counts.player2++;
+    } else if (/hdstream4u/i.test(host)) {
+      kind = "watch";
+      priority = 1200;
+      counts.watch++;
+    } else if (/hubcdn/i.test(host)) {
+      kind = "hubcdn";
+      priority = 900;
+      counts.hubcdn++;
+    } else {
+      return;
+    }
+
+    seen[href] = true;
+    out.push({ url: href, label: label, kind: kind, priority: priority, quality: q });
+  });
+
+  console.log(
+    "[HDHub4u] site-stream links watch=" + counts.watch +
+    " player2=" + counts.player2 +
+    " hubcdn=" + counts.hubcdn
+  );
+
+  return out.sort(function(a, b) {
+    return b.priority - a.priority;
+  });
+}
+
+function resolveSiteStream(item, detailUrl) {
+  if (!item || !item.url) return Promise.resolve(null);
+  if (item.kind === "player2") return resolveHubstream(item.url, detailUrl);
+  if (item.kind === "watch") return resolveHdstream4u(item.url, detailUrl);
+  if (item.kind === "hubcdn") return resolveHubCdn(item.url, detailUrl);
+  return Promise.resolve(null);
+}
+
 function resolveHubCdn(url, referer) {
+  console.log("[HDHub4u] try HubCDN host=" + hostOf(url));
   return fetchText(url, { headers: { "Referer": referer || "" } }, 1800).then(function(x) {
-    var m = x.text.match(/[?&]r=([A-Za-z0-9+/=]+)/);
-    if (!m) return null;
-    var decoded = b64decode(m[1]);
-    var idx = decoded.lastIndexOf("link=");
-    var direct = idx >= 0 ? decoded.substring(idx + 5) : "";
+    var data = String(x.text || "");
+    var direct = "";
+
+    var reurl = data.match(/\b(?:var|let|const)\s+reurl\s*=\s*["']([^"']+)["']/i);
+    if (reurl && reurl[1]) {
+      var val = normalizeEscapedUrl(reurl[1]);
+      var rm = val.match(/[?&]r=([^&]+)/i);
+      if (rm) {
+        try {
+          var decoded = b64decode(decodeURIComponent(rm[1]));
+          var idx = decoded.lastIndexOf("link=");
+          direct = idx >= 0 ? decoded.substring(idx + 5) : decoded;
+        } catch (_) {}
+      } else {
+        var lm = val.match(/[?&]link=([^&]+)/i);
+        if (lm) {
+          try { direct = decodeURIComponent(lm[1]); } catch (_) { direct = lm[1]; }
+        } else if (/^https?:\/\//i.test(val)) {
+          direct = val;
+        }
+      }
+    }
+
+    if (!direct) {
+      var encoded = data.match(/[?&]r=([A-Za-z0-9+/=]+)/i) || data.match(/\br=([A-Za-z0-9+/=]{16,})/i);
+      if (encoded && encoded[1]) {
+        try {
+          var decoded2 = b64decode(encoded[1]);
+          var idx2 = decoded2.lastIndexOf("link=");
+          direct = idx2 >= 0 ? decoded2.substring(idx2 + 5) : decoded2;
+        } catch (_) {}
+      }
+    }
+
+    direct = normalizeEscapedUrl(direct);
     if (!direct) return null;
-    return verifyDirect(direct, url).then(function(v) {
-      return v ? { url: v.url, referer: url, label: "HubCDN", weakSeek: !!v.weakSeek } : null;
+
+    return verifyHls(direct, url, { "Referer": url }).then(function(hit) {
+      if (!hit) return null;
+      hit.label = "HubCDN";
+      hit.quality = 480;
+      return hit;
     });
   }).catch(function() { return null; });
 }
@@ -851,6 +1277,8 @@ function resolveServer(url, referer) {
   return (/techyboy4u|[?&]id=/i.test(url) ? getRedirectLinks(url, referer) : Promise.resolve(url)).then(function(resolved) {
     resolved = String(resolved || url).trim();
     var host = hostOf(resolved);
+    if (/hubstream|vidstack/i.test(host)) return resolveHubstream(resolved, referer);
+    if (/hdstream4u/i.test(host)) return resolveHdstream4u(resolved, referer);
     if (/pixeldrain/i.test(host)) {
       var pd = pixelDirect(resolved);
       return verifyDirect(pd, referer).then(function(v) { return v ? { url: v.url, referer: referer || "", label: "PixelDrain", weakSeek: !!v.weakSeek } : null; });
@@ -902,17 +1330,26 @@ function resolveTvQualityRedirect(block, detailUrl, episode) {
 }
 
 function resolveMoviePage(html, detailUrl) {
-  var blocks = movieBlocks(html, detailUrl).sort(function(a, b) { return blockScore(b) - blockScore(a); });
-  console.log("[HDHub4u] movie blocks=" + blocks.length + " order=" + blocks.slice(0, 6).map(function(b) { return qualityLabel(b.quality); }).join(","));
+  var links = siteStreamLinks(html, detailUrl);
+
   function next(i) {
-    if (i >= blocks.length || i >= 6) return Promise.resolve(null);
-    var b = blocks[i];
-    console.log("[HDHub4u] try q=" + qualityLabel(b.quality) + " host=" + hostOf(b.url));
-    return resolveServer(b.url, detailUrl).then(function(v) {
-      if (v) { v.quality = b.quality; return v; }
+    if (i >= links.length || i >= 5) return Promise.resolve(null);
+    var item = links[i];
+    console.log(
+      "[HDHub4u] stream try kind=" + item.kind +
+      " host=" + hostOf(item.url)
+    );
+    return resolveSiteStream(item, detailUrl).then(function(hit) {
+      if (hit) {
+        hit.quality = hit.quality || item.quality || 1080;
+        return hit;
+      }
+      return next(i + 1);
+    }).catch(function() {
       return next(i + 1);
     });
   }
+
   return next(0);
 }
 
@@ -949,17 +1386,22 @@ function resolveTvPage(html, detailUrl, episode) {
 
 function toStream(hit, info, mediaType, season, episode) {
   var suffix = mediaType === "tv" ? " S" + String(season).padStart(2, "0") + "E" + String(episode).padStart(2, "0") : "";
+  var headers = {
+    "User-Agent": UA,
+    "Accept": "*/*",
+    "Referer": hit.referer || ""
+  };
+  Object.keys(hit.headers || {}).forEach(function(k) {
+    headers[k] = hit.headers[k];
+  });
+
   return {
     name: PROVIDER,
     title: info.title + suffix + " • " + qualityLabel(hit.quality) + " • " + (hit.label || hostOf(hit.url)),
     url: hit.url,
     quality: qualityLabel(hit.quality),
     type: "direct",
-    headers: {
-      "User-Agent": UA,
-      "Accept": "*/*",
-      "Referer": hit.referer || ""
-    }
+    headers: headers
   };
 }
 
@@ -988,8 +1430,18 @@ function getStreams(tmdbId, mediaType, season, episode) {
       return resolveTvPage(page.text, page.url, e);
     });
   }).then(function(hit) {
-    if (!hit || !hit.url) return [];
-    console.log("[HDHub4u] FAST HIT host=" + hostOf(hit.url) + " q=" + qualityLabel(hit.quality) + " seekSafe=" + (!hit.weakSeek) + " elapsed=" + (Date.now() - started) + "ms");
+    if (!hit || !hit.url || !hit.isHls) {
+      if (hit && hit.url && !hit.isHls) {
+        console.log("[HDHub4u] reject progressive playback host=" + hostOf(hit.url));
+      }
+      return [];
+    }
+    console.log(
+      "[HDHub4u] FAST HLS HIT host=" + hostOf(hit.url) +
+      " q=" + qualityLabel(hit.quality) +
+      " source=" + (hit.label || "?") +
+      " elapsed=" + (Date.now() - started) + "ms"
+    );
     return [toStream(hit, info, type, s, e)];
   });
 

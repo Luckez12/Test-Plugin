@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -53,8 +53,8 @@
     {
       "id": "cinemode",
       "name": "CineMode",
-      "description": "CineMode real-site rebuild using exact TMDB routes, deployed bundle discovery, popup player chaining and verified direct playback",
-      "version": "2.0.0",
+      "description": "CineMode ZXCSTREAM fix using canonical TMDB player routes, source-endpoint capture and verified direct playback",
+      "version": "2.0.1",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

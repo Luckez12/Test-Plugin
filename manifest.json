@@ -63,7 +63,7 @@
         "tv"
       ],
       "filename": "providers/cinemode.js",
-      "enabled": false,
+      "enabled": true,
       "hasSettings": false,
       "formats": [
         "m3u8",

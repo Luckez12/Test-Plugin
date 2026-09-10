@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.7.8",
+  "version": "1.7.9",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -56,7 +56,7 @@
       "id": "cinemode",
       "name": "CineMode",
       "description": "CineMode ZXC same-session source capture that waits after protected backend source calls for downstream media",
-      "version": "2.1.4",
+      "version": "2.1.5",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

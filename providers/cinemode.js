@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.1.4";
+var VERSION = "2.1.5";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -558,7 +558,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
       ? [350, 850, 1450, 2200, 2850]
       : [450, 950, 1550, 2350, 3200],
 
-    match: playerStage && isZxc(startUrl) ? ZXC_MATCH : PLAYER_HINTS,
+    match: playerStage && (isZxc(startUrl) || isWorkerBootstrap(startUrl)) ? ZXC_MATCH : PLAYER_HINTS,
     blocked: BLOCKED,
     injectAbyssHook: true
   }).then(function(result) {

@@ -9,12 +9,12 @@ var UA =
   "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
-var BUDGET_MS = 8200;
+var BUDGET_MS = 7600;
 var PAGE_TIMEOUT_MS = 1500;
 var BUNDLE_TIMEOUT_MS = 1350;
 var ROUTE_WEBVIEW_MS = 3900;
-var PLAYER_WEBVIEW_MS = 5200;
-var VERIFY_MS = 900;
+var PLAYER_WEBVIEW_MS = 3600;
+var VERIFY_MS = 650;
 
 var MEDIA_RE = /\.(?:m3u8|mp4|m4v|webm)(?:$|[?#])/i;
 var HLS_RE = /\.m3u8(?:$|[?#])/i;
@@ -1283,7 +1283,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     });
   });
 
-  return timeout(work, BUDGET_MS, "CineMode provider")
+  return timeout(work, BUDGET_MS, "CineMode provider fast-return")
     .then(function(streams) {
       var list = Array.isArray(streams) ? streams : [];
       console.log(

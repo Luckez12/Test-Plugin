@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.1.5";
+var VERSION = "2.1.6";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -526,7 +526,7 @@ function interactions(type, season, episode) {
   return out;
 }
 
-function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage) {
+function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage, refererOverride) {
   if (!nativeAvailable()) return Promise.resolve([]);
 
   console.log(
@@ -536,10 +536,10 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
   );
 
   return globalThis.webviewResolve(startUrl, {
-    referer: playerStage ? BASE + "/" : BASE + "/",
+    referer: refererOverride || BASE + "/",
     directLoad: true,
     timeoutMs: timeoutMs,
-    finishAfterFirstMs: playerStage ? 3000 : 850,
+    finishAfterFirstMs: playerStage ? 350 : 850,
 
     /*
      * CineMode is ad-supported and its watch action can navigate away from
@@ -558,7 +558,7 @@ function webviewCapture(startUrl, type, season, episode, timeoutMs, playerStage)
       ? [350, 850, 1450, 2200, 2850]
       : [450, 950, 1550, 2350, 3200],
 
-    match: playerStage && (isZxc(startUrl) || isWorkerBootstrap(startUrl)) ? ZXC_MATCH : PLAYER_HINTS,
+    match: playerStage ? ZXC_MATCH : PLAYER_HINTS,
     blocked: BLOCKED,
     injectAbyssHook: true
   }).then(function(result) {
@@ -1128,8 +1128,16 @@ function probeZxcApis(playerUrl, tmdbId, type, season, episode) {
 }
 
 
-function resolveWorkerBootstrap(urls, type, season, episode, startedAt) {
-  var list = (urls || []).filter(isWorkerBootstrap).slice(0, 2);
+function resolveWorkerBootstrap(urls, type, season, episode, startedAt, parentUrl) {
+  var seen = {};
+  var list = (urls || []).filter(function(url) {
+    url = String(url || "").trim();
+    if (!/^https?:\/\//i.test(url) || blocked(url) || MEDIA_RE.test(url)) return false;
+    if (isZxc(url) && /\/player\//i.test(url)) return false;
+    if (seen[url]) return false;
+    seen[url] = true;
+    return true;
+  }).slice(0, 2);
   if (!list.length) return Promise.resolve(null);
 
   function next(index) {
@@ -1141,9 +1149,10 @@ function resolveWorkerBootstrap(urls, type, season, episode, startedAt) {
     var waitMs = Math.min(2200, Math.max(1000, remaining));
 
     console.log(
-      "[CineMode] worker-bootstrap attempt=" + (index + 1) +
+      "[CineMode] child-bootstrap attempt=" + (index + 1) +
       "/" + list.length +
       " host=" + hostOf(list[index]) +
+      " refererHost=" + hostOf(parentUrl || BASE) +
       " timeout=" + waitMs
     );
 
@@ -1153,12 +1162,13 @@ function resolveWorkerBootstrap(urls, type, season, episode, startedAt) {
       season,
       episode,
       waitMs,
-      true
+      true,
+      parentUrl || BASE + "/"
     ).then(function(rows) {
       var parsed = capturedRows(rows, list[index]);
 
       console.log(
-        "[CineMode] worker parsed direct=" + parsed.direct.length +
+        "[CineMode] child parsed direct=" + parsed.direct.length +
         " session=" + parsed.session.length +
         " endpoints=" + parsed.endpoints.length
       );
@@ -1181,7 +1191,7 @@ function resolveWorkerBootstrap(urls, type, season, episode, startedAt) {
     }).then(function(hit) {
       if (hit) {
         console.log(
-          "[CineMode] WORKER MEDIA HIT host=" + hostOf(hit.url)
+          "[CineMode] CHILD MEDIA HIT host=" + hostOf(hit.url)
         );
         return hit;
       }
@@ -1284,7 +1294,8 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
             type,
             season,
             episode,
-            startedAt
+            startedAt,
+            playerUrl
           ).then(function(workerHit) {
             if (workerHit) return workerHit;
 
@@ -1307,7 +1318,8 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
         type,
         season,
         episode,
-        startedAt
+        startedAt,
+        playerUrl
       ).then(function(workerHit) {
         if (workerHit) return workerHit;
 
@@ -1344,9 +1356,11 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
      * server #2 alive after server #1 already returned captured rows, causing
      * the outer VUEO 10s runtime timeout.
      */
+    var attemptCap = index === 0 ? 4200 : 2600;
     var eachTimeout = Math.min(
       PLAYER_WEBVIEW_MS,
-      Math.max(1100, remaining - 700)
+      attemptCap,
+      Math.max(1100, remaining - 1200)
     );
 
     console.log(

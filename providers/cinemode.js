@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.1.3";
+var VERSION = "2.1.4";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -9,7 +9,7 @@ var UA =
   "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
-var BUDGET_MS = 8200;
+var BUDGET_MS = 9300;
 var PAGE_TIMEOUT_MS = 1500;
 var BUNDLE_TIMEOUT_MS = 1350;
 var ROUTE_WEBVIEW_MS = 3900;
@@ -68,6 +68,12 @@ var ZXC_MATCH = [
   ".mp4",
   ".m4v",
   ".webm",
+  "workers.dev",
+  "berkas.",
+  "valstrax.",
+  "burat.",
+  "zinogre.",
+  "daedalus.",
   "/backend_/sources/",
   "/api/",
   "/source",
@@ -234,6 +240,12 @@ function zxcPlayerUrls(id, type, season, episode) {
 function isZxc(url) {
   return /(?:^|\.)zxc(?:stream|prime)\.xyz$/i.test(hostOf(url)) ||
          /(?:^|\.)player\.zxc(?:stream|prime)\.xyz$/i.test(hostOf(url));
+}
+
+function isWorkerBootstrap(url) {
+  var h = hostOf(url);
+  return /(?:^|\.)workers\.dev$/i.test(h) ||
+         /(?:^|\.)(?:berkas|valstrax|burat|zinogre|daedalus)\./i.test(h);
 }
 
 
@@ -750,6 +762,14 @@ function capturedRows(rows, fallbackReferer) {
 
     if (isZxc(url) && /\/player\//i.test(url)) return;
 
+    if (isWorkerBootstrap(url)) {
+      if (!seenPlayer[url]) {
+        seenPlayer[url] = true;
+        players.push(url);
+      }
+      return;
+    }
+
     if (genericSessionCandidate(url)) {
       if (!seenSession[url]) {
         seenSession[url] = true;
@@ -1107,6 +1127,71 @@ function probeZxcApis(playerUrl, tmdbId, type, season, episode) {
   });
 }
 
+
+function resolveWorkerBootstrap(urls, type, season, episode, startedAt) {
+  var list = (urls || []).filter(isWorkerBootstrap).slice(0, 2);
+  if (!list.length) return Promise.resolve(null);
+
+  function next(index) {
+    if (index >= list.length) return Promise.resolve(null);
+
+    var remaining = BUDGET_MS - (Date.now() - startedAt) - 500;
+    if (remaining < 1100) return Promise.resolve(null);
+
+    var waitMs = Math.min(2200, Math.max(1000, remaining));
+
+    console.log(
+      "[CineMode] worker-bootstrap attempt=" + (index + 1) +
+      "/" + list.length +
+      " host=" + hostOf(list[index]) +
+      " timeout=" + waitMs
+    );
+
+    return webviewCapture(
+      list[index],
+      type,
+      season,
+      episode,
+      waitMs,
+      true
+    ).then(function(rows) {
+      var parsed = capturedRows(rows, list[index]);
+
+      console.log(
+        "[CineMode] worker parsed direct=" + parsed.direct.length +
+        " session=" + parsed.session.length +
+        " endpoints=" + parsed.endpoints.length
+      );
+
+      return verifyFirst(parsed.direct, 6).then(function(hit) {
+        if (hit) return hit;
+
+        if (parsed.endpoints.length) {
+          return resolveCapturedEndpoints(
+            parsed.endpoints,
+            "",
+            type,
+            season,
+            episode
+          );
+        }
+
+        return null;
+      });
+    }).then(function(hit) {
+      if (hit) {
+        console.log(
+          "[CineMode] WORKER MEDIA HIT host=" + hostOf(hit.url)
+        );
+        return hit;
+      }
+      return next(index + 1);
+    });
+  }
+
+  return next(0);
+}
+
 function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
   var seen = {};
   var list = [];
@@ -1194,28 +1279,48 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
             return endpointHit;
           }
 
-          return verifyFirst(parsed.session, 4).then(function(sessionHit) {
-            if (sessionHit) {
-              console.log(
-                "[CineMode] browser-session HIT host=" +
-                hostOf(sessionHit.url)
-              );
-              return sessionHit;
-            }
-            return null;
+          return resolveWorkerBootstrap(
+            parsed.players,
+            type,
+            season,
+            episode,
+            startedAt
+          ).then(function(workerHit) {
+            if (workerHit) return workerHit;
+
+            return verifyFirst(parsed.session, 4).then(function(sessionHit) {
+              if (sessionHit) {
+                console.log(
+                  "[CineMode] browser-session HIT host=" +
+                  hostOf(sessionHit.url)
+                );
+                return sessionHit;
+              }
+              return null;
+            });
           });
         });
       }
 
-      return verifyFirst(parsed.session, 4).then(function(sessionHit) {
-        if (sessionHit) {
-          console.log(
-            "[CineMode] browser-session HIT host=" +
-            hostOf(sessionHit.url)
-          );
-          return sessionHit;
-        }
-        return null;
+      return resolveWorkerBootstrap(
+        parsed.players,
+        type,
+        season,
+        episode,
+        startedAt
+      ).then(function(workerHit) {
+        if (workerHit) return workerHit;
+
+        return verifyFirst(parsed.session, 4).then(function(sessionHit) {
+          if (sessionHit) {
+            console.log(
+              "[CineMode] browser-session HIT host=" +
+              hostOf(sessionHit.url)
+            );
+            return sessionHit;
+          }
+          return null;
+        });
       });
     });
   }

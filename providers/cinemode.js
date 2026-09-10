@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.1.6";
+var VERSION = "2.1.7";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -10,7 +10,7 @@ var UA =
   "(KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
 var BUDGET_MS = 9300;
-var PAGE_TIMEOUT_MS = 1500;
+var PAGE_TIMEOUT_MS = 3000;
 var BUNDLE_TIMEOUT_MS = 1350;
 var ROUTE_WEBVIEW_MS = 3900;
 var PLAYER_WEBVIEW_MS = 5200;
@@ -1441,6 +1441,20 @@ function getStreams(tmdbId, mediaType, season, episode) {
         " identity=" + pageMatches(page.text, info, id)
       );
 
+      return true;
+    }).catch(function(error) {
+      var message = error && error.message ? error.message : String(error);
+
+      if (/timeout/i.test(message) && nativeAvailable()) {
+        console.log(
+          "[CineMode] page preflight soft-timeout -> continue WebView elapsed=" +
+          (Date.now() - startedAt) + "ms"
+        );
+        return true;
+      }
+
+      throw error;
+    }).then(function() {
       if (!nativeAvailable()) return [];
 
       console.log(

@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.1.2";
+var VERSION = "2.1.3";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -1123,10 +1123,6 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
     if (!u || seen[u] || blocked(u)) return;
     if (!looksLikePlayer(u) || MEDIA_RE.test(u)) return;
 
-    /*
-     * ZXC canonical server=1 and server=2 were already added above.
-     * Do not add the same /player route without a server query again.
-     */
     if (isZxc(u) && /\/player\//i.test(u)) return;
 
     seen[u] = true;
@@ -1136,50 +1132,69 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
   list = list.slice(0, 2);
   if (!list.length) return Promise.resolve(null);
 
-  var remaining = BUDGET_MS - (Date.now() - startedAt) - VERIFY_MS - 200;
-  var eachTimeout = Math.min(PLAYER_WEBVIEW_MS, Math.max(1000, remaining));
-  if (remaining < 1200) return Promise.resolve(null);
-
   console.log(
     "[CineMode] player-stage candidates=" + list.length +
-    " hosts=" + list.map(hostOf).join("|")
+    " mode=sequential-fast"
   );
 
-  return Promise.all(list.map(function(u) {
-    return webviewCapture(u, type, season, episode, eachTimeout, true)
-      .then(function(rows) {
-        var capturedPaths = (rows || []).slice(0, 8).map(function(row) {
-          try {
-            var ru = new URL(String(row && row.url || ""));
-            return ru.pathname;
-          } catch (_) {
-            return "?";
-          }
-        }).join("|");
+  function processRows(rows, playerUrl) {
+    var capturedPaths = (rows || []).slice(0, 8).map(function(row) {
+      try {
+        return new URL(String(row && row.url || "")).pathname;
+      } catch (_) {
+        return "?";
+      }
+    }).join("|");
 
-        if (capturedPaths) {
-          console.log("[CineMode] player capture paths=" + capturedPaths);
-        } else {
-          console.log("[CineMode] player capture paths=none");
-        }
+    console.log(
+      "[CineMode] player capture paths=" +
+      (capturedPaths || "none")
+    );
 
-        var parsed = capturedRows(rows, u);
+    var parsed = capturedRows(rows, playerUrl);
 
+    console.log(
+      "[CineMode] player parsed host=" + hostOf(playerUrl) +
+      " direct=" + parsed.direct.length +
+      " session=" + parsed.session.length +
+      " endpoints=" + parsed.endpoints.length +
+      " childPlayers=" + parsed.players.length
+    );
+
+    return verifyFirst(parsed.direct, 6).then(function(hit) {
+      if (hit) {
+        console.log("[CineMode] DIRECT HIT host=" + hostOf(hit.url));
+        return hit;
+      }
+
+      /*
+       * Important: replay protected /backend_/sources requests BEFORE trying
+       * generic session URLs. The worker root seen in browser capture can be a
+       * tiny HTML/bootstrap page, while the protected source endpoint contains
+       * the actual media URL.
+       */
+      if (parsed.endpoints.length) {
         console.log(
-          "[CineMode] player parsed host=" + hostOf(u) +
-          " direct=" + parsed.direct.length +
-          " session=" + parsed.session.length +
-          " endpoints=" + parsed.endpoints.length +
-          " childPlayers=" + parsed.players.length +
-          (parsed.endpoints[0] && parsed.endpoints[0].method
-            ? " method=" + parsed.endpoints[0].method
-            : "")
+          "[CineMode] protected source replay count=" +
+          parsed.endpoints.length
         );
 
-        return verifyFirst(parsed.direct, 8).then(function(hit) {
-          if (hit) return hit;
+        return resolveCapturedEndpoints(
+          parsed.endpoints,
+          tmdbId,
+          type,
+          season,
+          episode
+        ).then(function(endpointHit) {
+          if (endpointHit) {
+            console.log(
+              "[CineMode] SOURCE REPLAY HIT host=" +
+              hostOf(endpointHit.url)
+            );
+            return endpointHit;
+          }
 
-          return verifyFirst(parsed.session, 8).then(function(sessionHit) {
+          return verifyFirst(parsed.session, 4).then(function(sessionHit) {
             if (sessionHit) {
               console.log(
                 "[CineMode] browser-session HIT host=" +
@@ -1187,24 +1202,73 @@ function resolvePlayerPages(urls, type, season, episode, startedAt, tmdbId) {
               );
               return sessionHit;
             }
-
-            if (parsed.endpoints.length) {
-              console.log(
-                "[CineMode] protected source captured=" +
-                parsed.endpoints.length +
-                " but no downstream media captured"
-              );
-            }
             return null;
           });
         });
+      }
+
+      return verifyFirst(parsed.session, 4).then(function(sessionHit) {
+        if (sessionHit) {
+          console.log(
+            "[CineMode] browser-session HIT host=" +
+            hostOf(sessionHit.url)
+          );
+          return sessionHit;
+        }
+        return null;
       });
-  })).then(function(results) {
-    for (var i = 0; i < results.length; i++) {
-      if (results[i]) return results[i];
+    });
+  }
+
+  function tryPlayer(index) {
+    if (index >= list.length) return Promise.resolve(null);
+
+    var elapsed = Date.now() - startedAt;
+    var remaining = BUDGET_MS - elapsed - 450;
+
+    if (remaining < 1200) {
+      console.log(
+        "[CineMode] stop player fallback remaining=" +
+        remaining + "ms"
+      );
+      return Promise.resolve(null);
     }
-    return null;
-  });
+
+    /*
+     * Only one WebView is active at a time. Previous Promise.all() could leave
+     * server #2 alive after server #1 already returned captured rows, causing
+     * the outer VUEO 10s runtime timeout.
+     */
+    var eachTimeout = Math.min(
+      PLAYER_WEBVIEW_MS,
+      Math.max(1100, remaining - 700)
+    );
+
+    console.log(
+      "[CineMode] player attempt=" + (index + 1) +
+      "/" + list.length +
+      " timeout=" + eachTimeout
+    );
+
+    return webviewCapture(
+      list[index],
+      type,
+      season,
+      episode,
+      eachTimeout,
+      true
+    ).then(function(rows) {
+      return processRows(rows, list[index]);
+    }).then(function(hit) {
+      if (hit) {
+        console.log("[CineMode] EARLY PLAYER RETURN");
+        return hit;
+      }
+      return tryPlayer(index + 1);
+    });
+  }
+
+  return tryPlayer(0);
 }
 
 function toStream(hit, info, type, season, episode) {

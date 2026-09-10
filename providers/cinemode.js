@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.1.0";
+var VERSION = "2.1.1";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 

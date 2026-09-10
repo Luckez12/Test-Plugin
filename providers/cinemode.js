@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.0.6";
+var VERSION = "2.0.9";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -9,11 +9,11 @@ var UA =
   "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 
-var BUDGET_MS = 7600;
+var BUDGET_MS = 8200;
 var PAGE_TIMEOUT_MS = 1500;
 var BUNDLE_TIMEOUT_MS = 1350;
 var ROUTE_WEBVIEW_MS = 3900;
-var PLAYER_WEBVIEW_MS = 3200;
+var PLAYER_WEBVIEW_MS = 5200;
 var VERIFY_MS = 900;
 
 var MEDIA_RE = /\.(?:m3u8|mp4|m4v|webm)(?:$|[?#])/i;
@@ -1213,13 +1213,28 @@ function toStream(hit, info, type, season, episode) {
       "E" + String(episode).padStart(2, "0")
     : "";
 
+  var referer = hit.referer ||
+    hit.referrer ||
+    "https://zxcstream.xyz/";
+  var headers = sanitiseHeaders(hit.headers, referer);
+
+  // Browser-captured sessions often require the original player context.
+  if (!headers.Origin) {
+    headers.Origin = "https://zxcstream.xyz";
+  }
+
+  console.log(
+    "[CineMode] stream headers=" +
+    Object.keys(headers).join(",")
+  );
+
   return {
     name: PROVIDER,
     title: (info.title || PROVIDER) + suffix,
     url: hit.url,
     quality: hit.quality || inferQuality(hit.url, hit.label),
     type: "direct",
-    headers: sanitiseHeaders(hit.headers, hit.referer || BASE + "/")
+    headers: headers
   };
 }
 

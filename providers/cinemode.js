@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER = "CineMode";
-var VERSION = "2.0.9";
+var VERSION = "2.1.0";
 var BASE = "https://cinemode.fun";
 var TMDB_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 
@@ -1213,28 +1213,13 @@ function toStream(hit, info, type, season, episode) {
       "E" + String(episode).padStart(2, "0")
     : "";
 
-  var referer = hit.referer ||
-    hit.referrer ||
-    "https://zxcstream.xyz/";
-  var headers = sanitiseHeaders(hit.headers, referer);
-
-  // Browser-captured sessions often require the original player context.
-  if (!headers.Origin) {
-    headers.Origin = "https://zxcstream.xyz";
-  }
-
-  console.log(
-    "[CineMode] stream headers=" +
-    Object.keys(headers).join(",")
-  );
-
   return {
     name: PROVIDER,
     title: (info.title || PROVIDER) + suffix,
     url: hit.url,
     quality: hit.quality || inferQuality(hit.url, hit.label),
     type: "direct",
-    headers: headers
+    headers: sanitiseHeaders(hit.headers, hit.referer || BASE + "/")
   };
 }
 

@@ -103,6 +103,53 @@ async function testPartialTitleDoesNotSelectSequel() {
   assert.deepStrictEqual(streams, [], 'a sequel/longer partial title must not be accepted');
 }
 
+
+async function testGentlemenDoesNotMatchPrincess() {
+  global.VUEO_DISCOVERY_CONTEXT = {
+    tmdbId: '236235',
+    mediaType: 'tv',
+    title: 'The Gentlemen',
+    year: '2024',
+    tmdb: { id: 236235, name: 'The Gentlemen', first_air_date: '2024-03-07' }
+  };
+  delete global.vueoDiscoveryContext;
+
+  let videoKeyCalls = 0;
+  let sourceCalls = 0;
+  global.fetch = (url) => {
+    url = String(url);
+    if (url.includes('api.themoviedb.org')) {
+      throw new Error('TMDB should not be called for matching direct context');
+    }
+    if (url.includes('/api/DramaList/Search')) {
+      return response([{ id: 9557, title: 'The Princess (2024)', year: 2024, type: 'drama' }]);
+    }
+    if (url.includes('/api/DramaList/Drama/9557')) {
+      return response({
+        id: 9557,
+        title: 'The Princess (2024)',
+        releaseDate: '2024-01-01',
+        type: 'drama',
+        episodes: [{ id: 955701, number: 1 }]
+      });
+    }
+    if (url.includes('script.google.com/macros/')) {
+      videoKeyCalls += 1;
+      return response({ key: 'should-not-be-used' });
+    }
+    if (url.includes('/api/DramaList/Episode/')) {
+      sourceCalls += 1;
+      return response({ Video: 'https://cdn.example/wrong.m3u8' });
+    }
+    throw new Error('Unexpected URL: ' + url);
+  };
+
+  const streams = await loadProvider().getStreams('236235', 'tv', 1, 1);
+  assert.deepStrictEqual(streams, [], 'The Princess must never match The Gentlemen');
+  assert.strictEqual(videoKeyCalls, 0, 'wrong-title candidate must stop before video-key lookup');
+  assert.strictEqual(sourceCalls, 0, 'wrong-title candidate must stop before source lookup');
+}
+
 async function testMatchingContextCanBeUsed() {
   global.VUEO_DISCOVERY_CONTEXT = {
     tmdbId: '444',
@@ -147,6 +194,7 @@ async function testMatchingContextCanBeUsed() {
 (async () => {
   await testStaleContextFallsBackToRequestedTmdb();
   await testPartialTitleDoesNotSelectSequel();
+  await testGentlemenDoesNotMatchPrincess();
   await testMatchingContextCanBeUsed();
   console.log('KissKH regression tests passed.');
 })().catch((error) => {

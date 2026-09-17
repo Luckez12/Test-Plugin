@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.7.11",
+  "version": "1.7.12",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -78,8 +78,8 @@
     {
       "id": "kisskh",
       "name": "KissKH",
-      "description": "KissKH strict TMDB/title/year provider with stale-context protection and alternate search fallback",
-      "version": "1.0.9",
+      "description": "KissKH strict TMDB/title gate with stale-context protection and safe search fallback",
+      "version": "1.0.10",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

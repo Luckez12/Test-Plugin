@@ -78,8 +78,8 @@
     {
       "id": "kisskh",
       "name": "KissKH",
-      "description": "KissKH exact-title lookup with year-only duplicate selection",
-      "version": "1.0.10",
+      "description": "KissKH exact-title lookup with reusable cached video key",
+      "version": "1.0.11",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

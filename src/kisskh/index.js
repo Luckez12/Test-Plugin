@@ -1,13 +1,16 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.10";
+var VERSION = "1.0.11";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
 var KISSKH_VERSION = "2.8.10";
 var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
 var VIDEO_KEY_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id=";
+var VIDEO_KEY_CACHE_SLOT = "__VUEO_KISSKH_VIDEO_KEY_CACHE__";
+var VIDEO_KEY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+var LOCAL_VIDEO_KEY_CACHE = {};
 
 var USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
 var DEFAULT_HEADERS = {
@@ -407,16 +410,74 @@ function selectEpisode(detail, mediaType, season, episode) {
   return exact;
 }
 
-function getVideoKey(episodeId) {
+function getVideoKeyCache() {
+  var base = String(BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "");
+  var bucketId = base + "|" + KISSKH_VERSION;
+  var store = LOCAL_VIDEO_KEY_CACHE;
+
+  if (typeof globalThis === "object" && globalThis) {
+    if (!globalThis[VIDEO_KEY_CACHE_SLOT] ||
+        typeof globalThis[VIDEO_KEY_CACHE_SLOT] !== "object") {
+      globalThis[VIDEO_KEY_CACHE_SLOT] = {};
+    }
+    store = globalThis[VIDEO_KEY_CACHE_SLOT];
+  }
+
+  if (!store[bucketId] || typeof store[bucketId] !== "object") {
+    store[bucketId] = { key: "", fetchedAt: 0, promise: null };
+  }
+  return store[bucketId];
+}
+
+function clearVideoKeyCache(expectedKey) {
+  var cache = getVideoKeyCache();
+  if (!expectedKey || cache.key === expectedKey) {
+    cache.key = "";
+    cache.fetchedAt = 0;
+  }
+}
+
+function getVideoKey(episodeId, forceRefresh) {
+  var cache = getVideoKeyCache();
+  var now = Date.now();
+  var age = cache.fetchedAt ? now - cache.fetchedAt : Infinity;
+
+  if (!forceRefresh && cache.key && age < VIDEO_KEY_CACHE_TTL_MS) {
+    console.log("[KissKH] video key=cache-hit age=" + age + "ms");
+    return Promise.resolve(cache.key);
+  }
+
+  if (!forceRefresh && cache.promise) {
+    console.log("[KissKH] video key=shared-inflight");
+    return cache.promise;
+  }
+
   var url = VIDEO_KEY_API + encodeURIComponent(episodeId) +
     "&version=" + encodeURIComponent(KISSKH_VERSION);
   var started = Date.now();
-  return fetchJson(url, {}).then(function(data) {
+  var request = fetchJson(url, {}).then(function(data) {
     if (!data || !data.key) throw new Error("Empty KissKH video key");
-    console.log("[KissKH] video key=stable elapsed=" +
+    cache.key = data.key;
+    cache.fetchedAt = Date.now();
+    console.log("[KissKH] video key=remote elapsed=" +
       (Date.now() - started) + "ms");
     return data.key;
   });
+
+  cache.promise = request.then(function(key) {
+    cache.promise = null;
+    return key;
+  }, function(error) {
+    cache.promise = null;
+    throw error;
+  });
+  return cache.promise;
+}
+
+function isVideoKeyAuthError(error) {
+  return /\bHTTP\s+(?:401|403)\b/i.test(
+    String(error && error.message || error || "")
+  );
 }
 
 function getSources(episodeId, key) {
@@ -476,8 +537,15 @@ function getStreams(tmdbId, mediaType, season, episode) {
     .then(function(detail) {
       var selected = selectEpisode(detail, type, season, episode);
       if (!selected || selected.id === undefined) throw new Error("KissKH episode ID is missing");
-      return getVideoKey(selected.id).then(function(key) {
-        return getSources(selected.id, key);
+      return getVideoKey(selected.id, false).then(function(key) {
+        return getSources(selected.id, key).catch(function(error) {
+          if (!isVideoKeyAuthError(error)) throw error;
+          clearVideoKeyCache(key);
+          console.log("[KissKH] video key rejected; refreshing once");
+          return getVideoKey(selected.id, true).then(function(freshKey) {
+            return getSources(selected.id, freshKey);
+          });
+        });
       });
     })
     .then(function(source) {

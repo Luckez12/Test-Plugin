@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.10";
+var VERSION = "1.0.9";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
@@ -397,25 +397,14 @@ function aliasList(info) {
   return uniqueText([info.title, info.originalTitle].concat(info.aliases || []));
 }
 
-function strictTitleMatch(value, info) {
-  var normalized = normalizeTitle(cleanCandidateTitle(value));
-  if (!normalized) return false;
-  return aliasList(info).some(function(alias) {
-    return normalized === normalizeTitle(alias);
-  });
-}
-
 function candidateQuickScore(item, info, mediaType) {
+  var aliases = aliasList(info);
   var title = cleanCandidateTitle(item && item.title);
-  var score = strictTitleMatch(title, info) ? 100 : 0;
+  var score = 0;
 
-  // Title similarity is ranking-only. A non-exact title can never become a
-  // valid match later just because its year/type happens to match TMDB.
-  if (!score) {
-    aliasList(info).forEach(function(alias) {
-      score = Math.max(score, Math.min(titleScore(title, alias), 20));
-    });
-  }
+  aliases.forEach(function(alias) {
+    score = Math.max(score, titleScore(title, alias));
+  });
 
   var year = candidateYear(item);
   if (info.year && year) {
@@ -434,7 +423,10 @@ function verifyCandidateDetail(base, candidate, info, mediaType) {
     .then(function(detail) {
       var aliases = aliasList(info);
       var score = 0;
-      var exactTitle = strictTitleMatch(detail && detail.title, info);
+      var detailTitle = normalizeTitle(cleanCandidateTitle(detail && detail.title));
+      var exactTitle = aliases.some(function(alias) {
+        return detailTitle && detailTitle === normalizeTitle(alias);
+      });
 
       aliases.forEach(function(alias) {
         score = Math.max(
@@ -443,17 +435,9 @@ function verifyCandidateDetail(base, candidate, info, mediaType) {
         );
       });
 
-      // Hard gate: year/type points are never allowed to rescue a wrong title.
-      // This blocks cases such as The Princess (2024) matching The Gentlemen
-      // merely because both share the word "The", year 2024 and TV/drama type.
-      if (!exactTitle) {
-        console.log(
-          "[KissKH] REJECT host=" + base +
-          " title='" + String(detail && detail.title || "") +
-          "' reason=title-mismatch expected='" + String(info.title || "") + "'"
-        );
-        return null;
-      }
+      // Never accept a sequel/remake/longer title just because it contains the
+      // requested title. This is the main guard against playing the wrong movie.
+      if (!exactTitle) return null;
 
       var detailYear = candidateYear(detail) || candidateYear(candidate);
       score += yearScore(detailYear, info.year);
@@ -532,7 +516,10 @@ function findBestDrama(info, mediaType) {
 
       var score = candidateQuickScore(best, info, mediaType);
       var bestYear = candidateYear(best);
-      var exactAlias = strictTitleMatch(best.title, info);
+      var cleanBest = normalizeTitle(cleanCandidateTitle(best.title));
+      var exactAlias = aliasList(info).some(function(alias) {
+        return cleanBest === normalizeTitle(alias);
+      });
 
       if (
         exactAlias &&

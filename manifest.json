@@ -78,7 +78,7 @@
     {
       "id": "kisskh",
       "name": "KissKH",
-      "description": "KissKH strict TMDB/title/year provider with stale-context protection and alternate search fallback",
+      "description": "KissKH strict title gate with focused search fallback",
       "version": "1.0.9",
       "author": "Luckez12",
       "supportedTypes": [

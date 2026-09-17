@@ -45,22 +45,6 @@ function normalizeTitle(value) {
     .trim();
 }
 
-function titleScore(candidate, expected) {
-  var left = normalizeTitle(candidate);
-  var right = normalizeTitle(expected);
-  if (!left || !right) return 0;
-  if (left === right) return 100;
-  if (left.indexOf(right) !== -1 || right.indexOf(left) !== -1) return 75;
-
-  var expectedWords = right.split(" ");
-  var candidateWords = new Set(left.split(" "));
-  var matched = expectedWords.filter(function(word) {
-    return word.length > 1 && candidateWords.has(word);
-  }).length;
-
-  return Math.round((matched / Math.max(expectedWords.length, 1)) * 60);
-}
-
 
 function uniqueText(values) {
   var out = [];
@@ -105,10 +89,6 @@ function collectTmdbAliases(data, mediaType) {
 }
 
 function buildSearchQueries(info) {
-  var seeds = uniqueText(
-    [info.title, info.originalTitle].concat(info.aliases || [])
-  ).slice(0, 8);
-
   var out = [];
   var seen = {};
 
@@ -120,20 +100,32 @@ function buildSearchQueries(info) {
     out.push(text);
   }
 
-  seeds.forEach(function(title) {
-    add(title);
+  // Keep discovery focused: official title first, then at most two meaningful
+  // metadata alternatives, then one title+year fallback.
+  add(info.title);
 
-    // KissKH search has historically behaved differently around apostrophes.
-    add(title.replace(/[’'`]/g, ""));
-    add(title.replace(/[’'`]s\b/gi, ""));
-    add(title.replace(/[’'`]/g, " "));
+  if (info.originalTitle && normalizeTitle(info.originalTitle) !== normalizeTitle(info.title)) {
+    add(info.originalTitle);
+  }
 
-    if (info.year) {
-      add(title + " " + info.year);
-    }
+  (info.aliases || []).some(function(alias) {
+    if (out.length >= 3) return true;
+    if (normalizeTitle(alias) === normalizeTitle(info.title)) return false;
+    add(alias);
+    return out.length >= 3;
   });
 
-  return out.slice(0, 10);
+  // A punctuation-only spelling is useful for sites that index possessives
+  // without an apostrophe, but never expand into a large variant matrix.
+  if (out.length < 3 && /[’'`´]/.test(String(info.title || ""))) {
+    add(String(info.title).replace(/[’'`´]/g, ""));
+  }
+
+  if (info.year) {
+    add(info.title + " " + info.year);
+  }
+
+  return out.slice(0, 4);
 }
 
 function typeLabel(value) {
@@ -194,43 +186,6 @@ function isDirectStream(url) {
   return value.indexOf(".m3u8") !== -1 || value.indexOf(".mp4") !== -1;
 }
 
-
-function contextTmdbId(context) {
-  if (!context || typeof context !== "object") return "";
-  var tmdb = context.tmdb && typeof context.tmdb === "object" ? context.tmdb : null;
-  var values = [
-    context.tmdbId,
-    context.tmdb_id,
-    context.tmdbID,
-    tmdb && tmdb.id
-  ];
-
-  for (var i = 0; i < values.length; i += 1) {
-    if (values[i] !== undefined && values[i] !== null && String(values[i]).trim()) {
-      return String(values[i]).trim();
-    }
-  }
-  return "";
-}
-
-function contextMediaType(context) {
-  if (!context || typeof context !== "object") return "";
-  var value = String(
-    context.mediaType || context.media_type || context.type || ""
-  ).toLowerCase().trim();
-  if (value === "movie" || value === "tv") return value;
-  return "";
-}
-
-function isDirectContextForRequest(context, tmdbId, mediaType) {
-  var contextId = contextTmdbId(context);
-  if (!contextId || contextId !== String(tmdbId)) return false;
-
-  var contextType = contextMediaType(context);
-  if (contextType && contextType !== mediaType) return false;
-  return true;
-}
-
 function getTmdbInfo(tmdbId, mediaType) {
   var started = Date.now();
   var endpoint = mediaType === "movie" ? "movie" : "tv";
@@ -270,34 +225,30 @@ function getTmdbInfo(tmdbId, mediaType) {
     if (typeof globalThis !== "undefined") {
       var directContext = parseContext(globalThis.VUEO_DISCOVERY_CONTEXT);
       if (directContext) {
-        // Global discovery context may still contain the previously opened title.
-        // Only trust it when it explicitly belongs to this TMDB request.
-        if (isDirectContextForRequest(directContext, tmdbId, mediaType)) {
-          var directTmdb = directContext.tmdb && typeof directContext.tmdb === "object"
-            ? directContext.tmdb
-            : {
-                id: Number(tmdbId),
-                title: mediaType === "movie" ? directContext.title : undefined,
-                name: mediaType === "tv" ? directContext.title : undefined,
-                original_title: mediaType === "movie" ? directContext.originalTitle : undefined,
-                original_name: mediaType === "tv" ? directContext.originalTitle : undefined,
-                release_date: mediaType === "movie" && directContext.year
-                  ? String(directContext.year) + "-01-01" : "",
-                first_air_date: mediaType === "tv" && directContext.year
-                  ? String(directContext.year) + "-01-01" : ""
-              };
+        var directTmdb = directContext.tmdb && typeof directContext.tmdb === "object"
+          ? directContext.tmdb
+          : {
+              title: mediaType === "movie" ? directContext.title : undefined,
+              name: mediaType === "tv" ? directContext.title : undefined,
+              original_title: mediaType === "movie" ? directContext.originalTitle : undefined,
+              original_name: mediaType === "tv" ? directContext.originalTitle : undefined,
+              release_date: mediaType === "movie" && directContext.year
+                ? String(directContext.year) + "-01-01" : "",
+              first_air_date: mediaType === "tv" && directContext.year
+                ? String(directContext.year) + "-01-01" : ""
+            };
 
-          var directInfo = normalizeData(directTmdb, directContext);
-          if (directInfo && directInfo.title) {
-            console.log("[KissKH] metadata=shared-direct elapsed=" +
-              (Date.now() - started) + "ms");
-            return Promise.resolve(directInfo);
-          }
+        var directInfo = normalizeData(directTmdb, directContext);
 
-          console.log("[KissKH] metadata=shared-direct-empty fallback=true");
-        } else {
-          console.log("[KissKH] metadata=shared-direct-stale fallback=true");
+        // Some VUEO builds expose VUEO_DISCOVERY_CONTEXT before its title/TMDB
+        // payload is populated. Do not accept an empty shell as valid metadata.
+        if (directInfo && directInfo.title) {
+          console.log("[KissKH] metadata=shared-direct elapsed=" +
+            (Date.now() - started) + "ms");
+          return Promise.resolve(directInfo);
         }
+
+        console.log("[KissKH] metadata=shared-direct-empty fallback=true");
       }
 
       if (typeof globalThis.vueoDiscoveryContext === "function") {
@@ -305,18 +256,6 @@ function getTmdbInfo(tmdbId, mediaType) {
           .then(function(context) {
             context = parseContext(context);
             if (context) {
-              var sharedContextId = contextTmdbId(context);
-              if (sharedContextId && sharedContextId !== String(tmdbId)) {
-                console.log("[KissKH] metadata=shared-fn-stale fallback=true");
-                throw new Error("shared metadata belongs to another TMDB id");
-              }
-
-              var sharedType = contextMediaType(context);
-              if (sharedType && sharedType !== mediaType) {
-                console.log("[KissKH] metadata=shared-fn-type-mismatch fallback=true");
-                throw new Error("shared metadata belongs to another media type");
-              }
-
               var data = context.tmdb && typeof context.tmdb === "object"
                 ? context.tmdb
                 : {};
@@ -397,202 +336,188 @@ function aliasList(info) {
   return uniqueText([info.title, info.originalTitle].concat(info.aliases || []));
 }
 
-function candidateQuickScore(item, info, mediaType) {
-  var aliases = aliasList(info);
-  var title = cleanCandidateTitle(item && item.title);
-  var score = 0;
+function acceptedTitleKeys(info, mediaType, season) {
+  var keys = {};
+  aliasList(info).forEach(function(title) {
+    var key = normalizeTitle(title);
+    if (key) keys[key] = true;
 
-  aliases.forEach(function(alias) {
-    score = Math.max(score, titleScore(title, alias));
+    if (mediaType === "tv" && Number(season || 1) > 1) {
+      var seasonKey = normalizeTitle(title + " Season " + Number(season));
+      if (seasonKey) keys[seasonKey] = true;
+    }
   });
+  return keys;
+}
 
-  var year = candidateYear(item);
-  if (info.year && year) {
-    var diff = Math.abs(Number(info.year) - Number(year));
-    if (diff === 0) score += 35;
-    else if (diff === 1) score += 5;
-    else score -= 90;
+function titleMatchesExpected(value, info, mediaType, season) {
+  var key = normalizeTitle(cleanCandidateTitle(value));
+  if (!key) return false;
+  return !!acceptedTitleKeys(info, mediaType, season)[key];
+}
+
+function mediaTypeMatches(value, mediaType) {
+  var label = typeLabel(value);
+  if (!label) return true;
+
+  var saysMovie = /movie|film|webmovie/.test(label);
+  var saysSeries = /tv|series|drama|anime/.test(label);
+
+  if (mediaType === "movie") {
+    if (saysSeries && !saysMovie) return false;
+    return true;
   }
 
-  score += typePenalty(item, mediaType);
+  if (saysMovie && !saysSeries) return false;
+  return true;
+}
+
+function yearMatchesExpected(value, expectedYear) {
+  var year = candidateYear(value);
+  if (!expectedYear || !year) return true;
+  var diff = Math.abs(Number(expectedYear) - Number(year));
+  return Number.isFinite(diff) && diff <= 1;
+}
+
+function candidateStrictRank(item, info, mediaType, season) {
+  if (!item || !titleMatchesExpected(item.title, info, mediaType, season)) return -1;
+  if (!yearMatchesExpected(item, info.year)) return -1;
+  if (!mediaTypeMatches(item, mediaType)) return -1;
+
+  var clean = normalizeTitle(cleanCandidateTitle(item.title));
+  var score = 100;
+  if (clean === normalizeTitle(info.title)) score += 40;
+  else if (info.originalTitle && clean === normalizeTitle(info.originalTitle)) score += 25;
+
+  var year = candidateYear(item);
+  if (info.year && year && Number(info.year) === Number(year)) score += 20;
+  if (typeLabel(item)) score += 5;
   return score;
 }
 
-function verifyCandidateDetail(base, candidate, info, mediaType) {
+function rejectSearchGroup(group, info, mediaType, season, query) {
+  var rejected = (group || []).filter(function(item) {
+    return candidateStrictRank(item, info, mediaType, season) < 0;
+  });
+
+  rejected.slice(0, 2).forEach(function(item) {
+    var reason = "title-mismatch";
+    if (titleMatchesExpected(item && item.title, info, mediaType, season)) {
+      if (!yearMatchesExpected(item, info.year)) reason = "year-mismatch";
+      else if (!mediaTypeMatches(item, mediaType)) reason = "type-mismatch";
+    }
+    console.log(
+      "[KissKH] REJECT query='" + query +
+      "' title='" + String(item && item.title || "") +
+      "' reason=" + reason
+    );
+  });
+
+  return rejected.length;
+}
+
+function verifyCandidateDetail(base, candidate, info, mediaType, season) {
   return getDramaDetail(base, candidate.id)
     .then(function(detail) {
-      var aliases = aliasList(info);
-      var score = 0;
-      var detailTitle = normalizeTitle(cleanCandidateTitle(detail && detail.title));
-      var exactTitle = aliases.some(function(alias) {
-        return detailTitle && detailTitle === normalizeTitle(alias);
-      });
-
-      aliases.forEach(function(alias) {
-        score = Math.max(
-          score,
-          titleScore(cleanCandidateTitle(detail && detail.title), alias)
-        );
-      });
-
-      // Never accept a sequel/remake/longer title just because it contains the
-      // requested title. This is the main guard against playing the wrong movie.
-      if (!exactTitle) return null;
-
+      var title = String(detail && detail.title || candidate && candidate.title || "");
       var detailYear = candidateYear(detail) || candidateYear(candidate);
-      score += yearScore(detailYear, info.year);
-      score += typePenalty(detail, mediaType);
-      score += typePenalty(candidate, mediaType);
 
-      if (
-        mediaType === "movie" &&
-        detail &&
-        Array.isArray(detail.episodes) &&
-        detail.episodes.length === 1
-      ) {
-        score += 15;
+      if (!titleMatchesExpected(title, info, mediaType, season)) {
+        console.log(
+          "[KissKH] REJECT title='" + title + "' reason=title-mismatch"
+        );
+        return null;
       }
 
-      if (
-        score < 75 ||
-        (
-          info.year &&
-          detailYear &&
-          Math.abs(Number(info.year) - Number(detailYear)) > 1
-        )
-      ) {
+      if (!yearMatchesExpected(detailYear ? { year: detailYear } : candidate, info.year)) {
+        console.log(
+          "[KissKH] REJECT title='" + title + "' year=" + (detailYear || "?") +
+          " reason=year-mismatch"
+        );
+        return null;
+      }
+
+      if (!mediaTypeMatches(detail, mediaType) || !mediaTypeMatches(candidate, mediaType)) {
+        console.log(
+          "[KissKH] REJECT title='" + title + "' reason=type-mismatch"
+        );
         return null;
       }
 
       console.log(
         "[KissKH] MATCH host=" + base +
-        " title='" + String(detail && detail.title || "") +
+        " title='" + title +
         "' year=" + (detailYear || "?") +
-        " score=" + Math.round(score)
+        " strict=true"
       );
 
       BASE_URL = base;
       return detail;
     })
-    .catch(function() {
+    .catch(function(error) {
+      console.log(
+        "[KissKH] detail reject id=" + String(candidate && candidate.id || "?") +
+        " reason=" + String(error && error.message || "detail-error")
+      );
       return null;
     });
 }
 
-function findBestDrama(info, mediaType) {
+function findBestDrama(info, mediaType, season) {
   var queries = buildSearchQueries(info);
   var bases = [PRIMARY_BASE_URL, FALLBACK_BASE_URL];
 
   function searchBase(baseIndex) {
-    if (baseIndex >= bases.length) {
-      return Promise.resolve(null);
-    }
+    if (baseIndex >= bases.length) return Promise.resolve(null);
 
     var base = bases[baseIndex];
-    var seen = {};
-    var candidates = [];
-
-    function addGroup(group) {
-      (group || []).forEach(function(item) {
-        if (!item || item.id === undefined) return;
-        var key = String(item.id);
-        if (seen[key]) return;
-        seen[key] = true;
-        candidates.push(item);
-      });
-    }
-
-    function bestDirectCandidate(group) {
-      var list = (group || []).slice().sort(function(a, b) {
-        return candidateQuickScore(b, info, mediaType) -
-          candidateQuickScore(a, info, mediaType);
-      });
-
-      // Exact/near-exact title hits are common even when KissKH returns 50 rows.
-      // Verify only the strongest candidate first instead of fetching details
-      // for every candidate and waiting for all requests.
-      var best = list[0];
-      if (!best) return null;
-
-      var score = candidateQuickScore(best, info, mediaType);
-      var bestYear = candidateYear(best);
-      var cleanBest = normalizeTitle(cleanCandidateTitle(best.title));
-      var exactAlias = aliasList(info).some(function(alias) {
-        return cleanBest === normalizeTitle(alias);
-      });
-
-      if (
-        exactAlias &&
-        score >= 100 &&
-        (
-          !info.year ||
-          !bestYear ||
-          Math.abs(Number(info.year) - Number(bestYear)) <= 1
-        )
-      ) {
-        return best;
-      }
-
-      return null;
-    }
 
     function runQuery(index) {
-      if (index >= queries.length) {
-        // No direct exact hit. Verify only the top three accumulated candidates.
-        var top = candidates.slice().sort(function(a, b) {
-          return candidateQuickScore(b, info, mediaType) -
-            candidateQuickScore(a, info, mediaType);
-        }).slice(0, 3);
+      if (index >= queries.length) return Promise.resolve(null);
 
-        function verifyTop(i) {
-          if (i >= top.length) return Promise.resolve(null);
-          return verifyCandidateDetail(base, top[i], info, mediaType)
-            .then(function(detail) {
-              return detail || verifyTop(i + 1);
-            });
-        }
-
-        return verifyTop(0);
-      }
-
-      return searchKissKh(base, queries[index])
+      var query = queries[index];
+      return searchKissKh(base, query)
         .catch(function() { return []; })
         .then(function(group) {
-          addGroup(group);
+          var ranked = (group || []).map(function(item) {
+            return { item: item, score: candidateStrictRank(item, info, mediaType, season) };
+          }).filter(function(row) {
+            return row.score >= 0;
+          }).sort(function(a, b) {
+            return b.score - a.score;
+          });
 
-          var direct = bestDirectCandidate(group);
-          if (direct) {
-            console.log(
-              "[KissKH] fast candidate query='" + queries[index] +
-              "' title='" + String(direct.title || "") +
-              "' year=" + (candidateYear(direct) || "?")
-            );
+          var rejectedCount = rejectSearchGroup(group, info, mediaType, season, query);
+          console.log(
+            "[KissKH] filter query='" + query +
+            "' accepted=" + ranked.length +
+            " rejected=" + rejectedCount
+          );
 
-            return verifyCandidateDetail(base, direct, info, mediaType)
+          // Only candidates that already passed strict title/year/type checks
+          // are allowed to trigger a detail request. Verify at most three
+          // duplicates/remakes before moving to the next focused query.
+          function verifyRanked(i) {
+            if (i >= ranked.length || i >= 3) return Promise.resolve(null);
+            return verifyCandidateDetail(base, ranked[i].item, info, mediaType, season)
               .then(function(detail) {
-                if (detail) return detail;
-                return runQuery(index + 1);
+                return detail || verifyRanked(i + 1);
               });
           }
 
-          return runQuery(index + 1);
+          return verifyRanked(0).then(function(detail) {
+            if (detail) return detail;
+            return runQuery(index + 1);
+          });
         });
     }
 
     return runQuery(0).then(function(detail) {
       if (detail) return detail;
-
       console.log(
-        "[KissKH] no match host=" + base +
-        " candidates=" + candidates.length +
-        (candidates.length ? " top=" + candidateSummary(
-          candidates.slice().sort(function(a, b) {
-            return candidateQuickScore(b, info, mediaType) -
-              candidateQuickScore(a, info, mediaType);
-          })
-        ) : "")
+        "[KissKH] no strict match host=" + base +
+        " queries=" + queries.length
       );
-
       return searchBase(baseIndex + 1);
     });
   }
@@ -604,6 +529,7 @@ function findBestDrama(info, mediaType) {
     );
   });
 }
+
 function selectEpisode(detail, mediaType, season, episode) {
   var episodes = Array.isArray(detail.episodes) ? detail.episodes : [];
   if (episodes.length === 0) throw new Error("No KissKH episodes");
@@ -688,7 +614,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       info = value;
       if (!info.title) throw new Error("TMDB title is empty");
       console.log("[KissKH] title='" + info.title + "' year=" + (info.year || "?") + " aliases=" + (info.aliases || []).length);
-      return findBestDrama(info, type);
+      return findBestDrama(info, type, season || 1);
     })
     .then(function(detail) {
       var selected = selectEpisode(detail, type, season, episode);

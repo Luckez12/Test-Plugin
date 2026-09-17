@@ -78,8 +78,8 @@
     {
       "id": "kisskh",
       "name": "KissKH",
-      "description": "KissKH exact-title lookup with reusable cached video key",
-      "version": "1.0.11",
+      "description": "KissKH exact-title and TV-season lookup with reusable cached video key",
+      "version": "1.0.12",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

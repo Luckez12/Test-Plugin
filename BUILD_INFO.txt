@@ -1,20 +1,20 @@
-KissKH v1.0.10 exact-title build
+KissKH v1.0.12 — TV Season Matching Build
 
-Selection behavior:
-- Search the VUEO/TMDB title once.
-- If one exact normalized title exists, select it immediately.
-- If multiple exact-title results exist, use the release year to select.
-- If no exact title exists, stop without requesting detail/video.
-- Fallback domain is used only when the primary search request fails.
+Changes:
+- Keeps v1.0.10 exact-title movie lookup.
+- Keeps v1.0.11 reusable video-key cache.
+- Adds TV season-aware title matching for KissKH entries stored per season.
+- Example: VUEO "Reacher" S2 selects "Reacher - Season 2".
+- Season 1 accepts the bare base title and prefers an explicit "Season 1" entry when present.
+- Season 2+ requires an explicit matching season suffix.
+- Episode selection requires the requested episode number exactly.
+- Search remains one title query; season filtering is local and does not add search requests.
 
 Validation:
-- providers/kisskh.js syntax: PASS
-- src/kisskh/index.js syntax: PASS
-- manifest validation: PASS
-- single exact-title regression: PASS
-- duplicate-title/year regression: PASS
-- no-exact-title regression: PASS
+- manifest valid
+- provider syntax valid
+- source/runtime byte-identical
+- Reacher S2E3 regression: 1 search, 1 detail, correct season/episode stream
 
-Note: esbuild is not installed in this execution environment. For KissKH v1.0.10,
-src/kisskh/index.js and providers/kisskh.js are byte-identical and self-contained,
-so the validated runtime provider is included directly.
+Build note:
+- esbuild is not installed in this environment. src/kisskh/index.js and providers/kisskh.js are already byte-identical and self-contained, so the validated runtime provider is packaged directly.

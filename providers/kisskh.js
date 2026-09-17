@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.11";
+var VERSION = "1.0.12";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
@@ -258,10 +258,61 @@ function titleMatchesExact(value, info) {
   return !!actual && !!expected && actual === expected;
 }
 
+function parseTvSeasonTitle(value) {
+  var title = cleanCandidateTitle(value);
+  var season = null;
+  var explicit = false;
+  var match;
+
+  // KissKH commonly stores each TV season as a separate drama entry, e.g.
+  // "Reacher - Season 2", "Kingdom: Season 2", or "Season 2" without a dash.
+  match = title.match(/(?:\s*[-–—:]\s*|\s+)season\s*(\d+)\s*$/i);
+  if (match) {
+    season = Number(match[1]);
+    explicit = true;
+    title = title.slice(0, match.index).trim();
+  } else {
+    // Also support suffixes such as "2nd Season" / "3rd Season".
+    match = title.match(/(?:\s*[-–—:]\s*|\s+)(\d+)(?:st|nd|rd|th)\s+season\s*$/i);
+    if (match) {
+      season = Number(match[1]);
+      explicit = true;
+      title = title.slice(0, match.index).trim();
+    }
+  }
+
+  return {
+    baseTitle: title,
+    season: season,
+    explicit: explicit
+  };
+}
+
 function exactTitleCandidates(items, info) {
   return (items || []).filter(function(item) {
     return item && item.id !== undefined && titleMatchesExact(item.title, info);
   });
+}
+
+function exactTvSeasonCandidates(items, info, requestedSeason) {
+  var expected = normalizeTitle(info && info.title);
+  var seasonNumber = Math.max(1, Number(requestedSeason || 1));
+  var rows = [];
+
+  (items || []).forEach(function(item) {
+    if (!item || item.id === undefined) return;
+    var parsed = parseTvSeasonTitle(item.title);
+    if (!parsed.baseTitle || normalizeTitle(parsed.baseTitle) !== expected) return;
+
+    // For S2+, only an explicit matching season is safe. A bare base title is
+    // treated as S1 because many KissKH shows store their first season that way.
+    var itemSeason = parsed.explicit ? parsed.season : 1;
+    if (itemSeason !== seasonNumber) return;
+
+    rows.push({ item: item, parsed: parsed });
+  });
+
+  return rows;
 }
 
 function loadSelectedDetail(base, candidate, info, selectionReason) {
@@ -361,6 +412,50 @@ function selectExactTitle(base, group, info) {
   return resolveDuplicateByYear(base, exact, info);
 }
 
+function selectTvSeason(base, group, info, requestedSeason) {
+  var seasonNumber = Math.max(1, Number(requestedSeason || 1));
+  var matches = exactTvSeasonCandidates(group, info, seasonNumber);
+
+  console.log(
+    "[KissKH] exact tv title query='" + info.title +
+    "' season=" + seasonNumber +
+    " matches=" + matches.length +
+    " total=" + (group || []).length
+  );
+
+  if (matches.length === 0) return Promise.resolve(null);
+
+  // Prefer an explicit "Season 1" entry over a bare title when both exist.
+  // For S2+ every match is already explicit by exactTvSeasonCandidates().
+  if (seasonNumber === 1) {
+    var explicitS1 = matches.filter(function(row) {
+      return row.parsed.explicit && row.parsed.season === 1;
+    });
+    if (explicitS1.length > 0) matches = explicitS1;
+  }
+
+  var candidates = matches.map(function(row) { return row.item; });
+  if (candidates.length === 1) {
+    return loadSelectedDetail(base, candidates[0], info, "exact-tv-season-single");
+  }
+
+  // If duplicate entries exist for the same title+season, use the series year
+  // only as a tie-breaker when it directly matches one candidate. Do not reject
+  // all candidates when season release year differs from the series premiere year.
+  var expectedYear = String(info && info.year || "").match(/\b((?:19|20)\d{2})\b/);
+  expectedYear = expectedYear ? expectedYear[1] : "";
+  if (expectedYear) {
+    var yearMatches = candidates.filter(function(candidate) {
+      return candidateYear(candidate) === expectedYear;
+    });
+    if (yearMatches.length > 0) {
+      return loadSelectedDetail(base, yearMatches[0], info, "exact-tv-season-year");
+    }
+  }
+
+  return loadSelectedDetail(base, candidates[0], info, "exact-tv-season-first");
+}
+
 function findBestDrama(info, mediaType, season) {
   var query = String(info && info.title || "").replace(/\s+/g, " ").trim();
   if (!query) return Promise.reject(new Error("KissKH title is empty"));
@@ -369,7 +464,9 @@ function findBestDrama(info, mediaType, season) {
   // title+year variants, or score unrelated search results.
   return searchKissKh(PRIMARY_BASE_URL, query)
     .then(function(group) {
-      return selectExactTitle(PRIMARY_BASE_URL, group, info);
+      return mediaType === "tv"
+        ? selectTvSeason(PRIMARY_BASE_URL, group, info, season)
+        : selectExactTitle(PRIMARY_BASE_URL, group, info);
     }, function(primaryError) {
       // The fallback domain is only for an actual primary-host failure.
       // A successful search with zero exact titles is a valid negative result.
@@ -379,13 +476,17 @@ function findBestDrama(info, mediaType, season) {
       );
       return searchKissKh(FALLBACK_BASE_URL, query)
         .then(function(group) {
-          return selectExactTitle(FALLBACK_BASE_URL, group, info);
+          return mediaType === "tv"
+            ? selectTvSeason(FALLBACK_BASE_URL, group, info, season)
+            : selectExactTitle(FALLBACK_BASE_URL, group, info);
         });
     })
     .then(function(detail) {
       if (detail) return detail;
       throw new Error(
-        "No exact title match for " + info.title + " (" + (info.year || "?") + ")"
+        mediaType === "tv"
+          ? "No exact title/season match for " + info.title + " S" + Math.max(1, Number(season || 1))
+          : "No exact title match for " + info.title + " (" + (info.year || "?") + ")"
       );
     });
 }
@@ -394,7 +495,7 @@ function selectEpisode(detail, mediaType, season, episode) {
   var episodes = Array.isArray(detail.episodes) ? detail.episodes : [];
   if (episodes.length === 0) throw new Error("No KissKH episodes");
 
-  if (mediaType === "movie" || episodes.length === 1) {
+  if (mediaType === "movie") {
     return episodes[0];
   }
 
@@ -404,9 +505,6 @@ function selectEpisode(detail, mediaType, season, episode) {
   });
 
   if (!exact) throw new Error("Episode " + requestedEpisode + " not found on KissKH");
-  if (Number(season || 1) > 1) {
-    console.log("[KissKH] Source does not expose seasons; matching by episode number only");
-  }
   return exact;
 }
 

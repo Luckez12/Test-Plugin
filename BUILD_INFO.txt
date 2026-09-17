@@ -1,0 +1,20 @@
+KissKH v1.0.10 exact-title build
+
+Selection behavior:
+- Search the VUEO/TMDB title once.
+- If one exact normalized title exists, select it immediately.
+- If multiple exact-title results exist, use the release year to select.
+- If no exact title exists, stop without requesting detail/video.
+- Fallback domain is used only when the primary search request fails.
+
+Validation:
+- providers/kisskh.js syntax: PASS
+- src/kisskh/index.js syntax: PASS
+- manifest validation: PASS
+- single exact-title regression: PASS
+- duplicate-title/year regression: PASS
+- no-exact-title regression: PASS
+
+Note: esbuild is not installed in this execution environment. For KissKH v1.0.10,
+src/kisskh/index.js and providers/kisskh.js are byte-identical and self-contained,
+so the validated runtime provider is included directly.

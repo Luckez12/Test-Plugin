@@ -78,8 +78,8 @@
     {
       "id": "kisskh",
       "name": "KissKH",
-      "description": "KissKH strict title gate with focused search fallback",
-      "version": "1.0.9",
+      "description": "KissKH exact-title lookup with year-only duplicate selection",
+      "version": "1.0.10",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

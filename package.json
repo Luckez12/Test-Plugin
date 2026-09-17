@@ -6,7 +6,8 @@
   "scripts": {
     "build": "node build.js",
     "validate": "node scripts/validate-manifest.js",
-    "test:provider": "node tests/test-provider.js"
+    "test:provider": "node tests/test-provider.js",
+    "test:kisskh": "node tests/test-kisskh-regression.js"
   },
   "devDependencies": {
     "cheerio-without-node-native": "1.0.0-rc.2",

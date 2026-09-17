@@ -78,8 +78,8 @@
     {
       "id": "kisskh",
       "name": "KissKH",
-      "description": "KissKH strict title/year provider with punctuation, possessive and alternate search fallback",
-      "version": "1.0.4",
+      "description": "KissKH strict TMDB/title/year provider with stale-context protection and alternate search fallback",
+      "version": "1.0.9",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

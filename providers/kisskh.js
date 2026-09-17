@@ -1,7 +1,7 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.8";
+var VERSION = "1.0.9";
 var PRIMARY_BASE_URL = "https://kisskh.do";
 var FALLBACK_BASE_URL = "https://kisskh.id";
 var BASE_URL = PRIMARY_BASE_URL;
@@ -37,6 +37,8 @@ function fetchJson(url, headers) {
 function normalizeTitle(value) {
   return String(value || "")
     .toLowerCase()
+    .replace(/[’‘`´]/g, "'")
+    .replace(/([a-z0-9])'s\b/g, "$1s")
     .replace(/&/g, " and ")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
@@ -192,6 +194,43 @@ function isDirectStream(url) {
   return value.indexOf(".m3u8") !== -1 || value.indexOf(".mp4") !== -1;
 }
 
+
+function contextTmdbId(context) {
+  if (!context || typeof context !== "object") return "";
+  var tmdb = context.tmdb && typeof context.tmdb === "object" ? context.tmdb : null;
+  var values = [
+    context.tmdbId,
+    context.tmdb_id,
+    context.tmdbID,
+    tmdb && tmdb.id
+  ];
+
+  for (var i = 0; i < values.length; i += 1) {
+    if (values[i] !== undefined && values[i] !== null && String(values[i]).trim()) {
+      return String(values[i]).trim();
+    }
+  }
+  return "";
+}
+
+function contextMediaType(context) {
+  if (!context || typeof context !== "object") return "";
+  var value = String(
+    context.mediaType || context.media_type || context.type || ""
+  ).toLowerCase().trim();
+  if (value === "movie" || value === "tv") return value;
+  return "";
+}
+
+function isDirectContextForRequest(context, tmdbId, mediaType) {
+  var contextId = contextTmdbId(context);
+  if (!contextId || contextId !== String(tmdbId)) return false;
+
+  var contextType = contextMediaType(context);
+  if (contextType && contextType !== mediaType) return false;
+  return true;
+}
+
 function getTmdbInfo(tmdbId, mediaType) {
   var started = Date.now();
   var endpoint = mediaType === "movie" ? "movie" : "tv";
@@ -231,30 +270,34 @@ function getTmdbInfo(tmdbId, mediaType) {
     if (typeof globalThis !== "undefined") {
       var directContext = parseContext(globalThis.VUEO_DISCOVERY_CONTEXT);
       if (directContext) {
-        var directTmdb = directContext.tmdb && typeof directContext.tmdb === "object"
-          ? directContext.tmdb
-          : {
-              title: mediaType === "movie" ? directContext.title : undefined,
-              name: mediaType === "tv" ? directContext.title : undefined,
-              original_title: mediaType === "movie" ? directContext.originalTitle : undefined,
-              original_name: mediaType === "tv" ? directContext.originalTitle : undefined,
-              release_date: mediaType === "movie" && directContext.year
-                ? String(directContext.year) + "-01-01" : "",
-              first_air_date: mediaType === "tv" && directContext.year
-                ? String(directContext.year) + "-01-01" : ""
-            };
+        // Global discovery context may still contain the previously opened title.
+        // Only trust it when it explicitly belongs to this TMDB request.
+        if (isDirectContextForRequest(directContext, tmdbId, mediaType)) {
+          var directTmdb = directContext.tmdb && typeof directContext.tmdb === "object"
+            ? directContext.tmdb
+            : {
+                id: Number(tmdbId),
+                title: mediaType === "movie" ? directContext.title : undefined,
+                name: mediaType === "tv" ? directContext.title : undefined,
+                original_title: mediaType === "movie" ? directContext.originalTitle : undefined,
+                original_name: mediaType === "tv" ? directContext.originalTitle : undefined,
+                release_date: mediaType === "movie" && directContext.year
+                  ? String(directContext.year) + "-01-01" : "",
+                first_air_date: mediaType === "tv" && directContext.year
+                  ? String(directContext.year) + "-01-01" : ""
+              };
 
-        var directInfo = normalizeData(directTmdb, directContext);
+          var directInfo = normalizeData(directTmdb, directContext);
+          if (directInfo && directInfo.title) {
+            console.log("[KissKH] metadata=shared-direct elapsed=" +
+              (Date.now() - started) + "ms");
+            return Promise.resolve(directInfo);
+          }
 
-        // Some VUEO builds expose VUEO_DISCOVERY_CONTEXT before its title/TMDB
-        // payload is populated. Do not accept an empty shell as valid metadata.
-        if (directInfo && directInfo.title) {
-          console.log("[KissKH] metadata=shared-direct elapsed=" +
-            (Date.now() - started) + "ms");
-          return Promise.resolve(directInfo);
+          console.log("[KissKH] metadata=shared-direct-empty fallback=true");
+        } else {
+          console.log("[KissKH] metadata=shared-direct-stale fallback=true");
         }
-
-        console.log("[KissKH] metadata=shared-direct-empty fallback=true");
       }
 
       if (typeof globalThis.vueoDiscoveryContext === "function") {
@@ -262,6 +305,18 @@ function getTmdbInfo(tmdbId, mediaType) {
           .then(function(context) {
             context = parseContext(context);
             if (context) {
+              var sharedContextId = contextTmdbId(context);
+              if (sharedContextId && sharedContextId !== String(tmdbId)) {
+                console.log("[KissKH] metadata=shared-fn-stale fallback=true");
+                throw new Error("shared metadata belongs to another TMDB id");
+              }
+
+              var sharedType = contextMediaType(context);
+              if (sharedType && sharedType !== mediaType) {
+                console.log("[KissKH] metadata=shared-fn-type-mismatch fallback=true");
+                throw new Error("shared metadata belongs to another media type");
+              }
+
               var data = context.tmdb && typeof context.tmdb === "object"
                 ? context.tmdb
                 : {};
@@ -368,6 +423,10 @@ function verifyCandidateDetail(base, candidate, info, mediaType) {
     .then(function(detail) {
       var aliases = aliasList(info);
       var score = 0;
+      var detailTitle = normalizeTitle(cleanCandidateTitle(detail && detail.title));
+      var exactTitle = aliases.some(function(alias) {
+        return detailTitle && detailTitle === normalizeTitle(alias);
+      });
 
       aliases.forEach(function(alias) {
         score = Math.max(
@@ -375,6 +434,10 @@ function verifyCandidateDetail(base, candidate, info, mediaType) {
           titleScore(cleanCandidateTitle(detail && detail.title), alias)
         );
       });
+
+      // Never accept a sequel/remake/longer title just because it contains the
+      // requested title. This is the main guard against playing the wrong movie.
+      if (!exactTitle) return null;
 
       var detailYear = candidateYear(detail) || candidateYear(candidate);
       score += yearScore(detailYear, info.year);

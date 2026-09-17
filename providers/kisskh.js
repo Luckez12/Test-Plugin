@@ -1,15 +1,21 @@
 "use strict";
 
 var PROVIDER_NAME = "KissKH";
-var VERSION = "1.0.12";
-var PRIMARY_BASE_URL = "https://kisskh.do";
-var FALLBACK_BASE_URL = "https://kisskh.id";
+var VERSION = "1.0.13";
+var PRIMARY_BASE_URL = "https://kisskh.is";
+var FALLBACK_BASE_URL = "https://kisskh.do";
 var BASE_URL = PRIMARY_BASE_URL;
-var KISSKH_VERSION = "2.8.10";
 var TMDB_API_KEY = "1c29a5198ee1854bd5eb45dbe8d17d92";
-var VIDEO_KEY_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id=";
+
+// Current KissKH requires a reusable stream kkey. Prefer a key supplied by
+// VUEO or captured from KissKH's own episode page. The old Google Apps Script
+// is retained only as a bounded compatibility fallback.
+var LEGACY_VIDEO_KEY_API = "https://script.google.com/macros/s/AKfycbzn8B31PuDxzaMa9_CQ0VGEDasFqfzI5bXvjaIZH4DM8DNq9q6xj1ALvZNz_JT3jF0suA/exec?id=";
+var LEGACY_KISSKH_VERSION = "2.8.10";
 var VIDEO_KEY_CACHE_SLOT = "__VUEO_KISSKH_VIDEO_KEY_CACHE__";
-var VIDEO_KEY_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+var VIDEO_KEY_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+var WEBVIEW_KEY_TIMEOUT_MS = 3600;
+var LEGACY_KEY_TIMEOUT_MS = 2400;
 var LOCAL_VIDEO_KEY_CACHE = {};
 
 var USER_AGENT = "Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0 Mobile Safari/537.36";
@@ -325,6 +331,11 @@ function loadSelectedDetail(base, candidate, info, selectionReason) {
   return getDramaDetail(base, candidate.id)
     .then(function(detail) {
       BASE_URL = base;
+      if (detail && typeof detail === "object") {
+        detail.__dramaId = candidate.id;
+        detail.__selectedTitle = String(candidate.title || detail.title || "");
+        detail.__selectedUrl = String(candidate.url || candidate.link || candidate.slug || "");
+      }
       return detail;
     })
     .catch(function(error) {
@@ -509,8 +520,6 @@ function selectEpisode(detail, mediaType, season, episode) {
 }
 
 function getVideoKeyCache() {
-  var base = String(BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "");
-  var bucketId = base + "|" + KISSKH_VERSION;
   var store = LOCAL_VIDEO_KEY_CACHE;
 
   if (typeof globalThis === "object" && globalThis) {
@@ -521,10 +530,10 @@ function getVideoKeyCache() {
     store = globalThis[VIDEO_KEY_CACHE_SLOT];
   }
 
-  if (!store[bucketId] || typeof store[bucketId] !== "object") {
-    store[bucketId] = { key: "", fetchedAt: 0, promise: null };
+  if (!store.stream || typeof store.stream !== "object") {
+    store.stream = { key: "", fetchedAt: 0, promise: null };
   }
-  return store[bucketId];
+  return store.stream;
 }
 
 function clearVideoKeyCache(expectedKey) {
@@ -535,32 +544,193 @@ function clearVideoKeyCache(expectedKey) {
   }
 }
 
-function getVideoKey(episodeId, forceRefresh) {
+function readInjectedVideoKey() {
+  if (typeof globalThis !== "object" || !globalThis) return "";
+
+  var direct = [
+    globalThis.KISSKH_STREAM_KEY,
+    globalThis.VUEO_KISSKH_STREAM_KEY
+  ];
+
+  var context = globalThis.VUEO_DISCOVERY_CONTEXT;
+  if (context && typeof context === "object") {
+    direct.push(context.kisskhStreamKey);
+    direct.push(context.KISSKH_STREAM_KEY);
+    if (context.providerKeys && context.providerKeys.kisskh) {
+      direct.push(context.providerKeys.kisskh.stream || context.providerKeys.kisskh.streamKey);
+    }
+  }
+
+  for (var i = 0; i < direct.length; i++) {
+    var key = String(direct[i] || "").trim();
+    if (key.length >= 16) return key;
+  }
+  return "";
+}
+
+function fetchJsonWithTimeout(url, headers, timeoutMs) {
+  var timeout = Math.max(250, Number(timeoutMs || 0));
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  var timer;
+
+  var request = fetch(url, {
+    method: "GET",
+    headers: Object.assign({}, DEFAULT_HEADERS, headers || {}),
+    redirect: "follow",
+    signal: controller ? controller.signal : undefined
+  }).then(function(response) {
+    if (!response.ok) throw new Error("HTTP " + response.status + " for " + url);
+    return response.json();
+  });
+
+  var deadline = new Promise(function(_, reject) {
+    timer = setTimeout(function() {
+      try { if (controller) controller.abort(); } catch (_) {}
+      reject(new Error("timeout after " + timeout + "ms"));
+    }, timeout);
+  });
+
+  return Promise.race([request, deadline]).then(function(value) {
+    clearTimeout(timer);
+    return value;
+  }, function(error) {
+    clearTimeout(timer);
+    throw error;
+  });
+}
+
+function dramaSlug(value) {
+  return cleanCandidateTitle(value)
+    .replace(/[’‘`´']/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[\s\/\?\#\:]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "") || "Drama";
+}
+
+function dramaPageBase(detail) {
+  var base = String(detail && detail.__baseUrl || BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "");
+  var raw = String(detail && detail.__selectedUrl || "").trim();
+  var id = detail && detail.__dramaId;
+
+  if (/^https?:\/\//i.test(raw)) {
+    return raw.replace(/\/Episode-[^/?#]+.*$/i, "").replace(/[?#].*$/, "");
+  }
+
+  if (raw && raw.indexOf("/Drama/") !== -1) {
+    return base + (raw.charAt(0) === "/" ? raw : "/" + raw).replace(/[?#].*$/, "");
+  }
+
+  var slug = raw && raw.indexOf("/") === -1 ? raw : dramaSlug(detail && detail.__selectedTitle || detail && detail.title);
+  return base + "/Drama/" + encodeURIComponent(slug).replace(/%2D/gi, "-") +
+    (id !== undefined && id !== null ? "?id=" + encodeURIComponent(id) : "");
+}
+
+function episodePageUrl(detail, selected) {
+  var basePage = dramaPageBase(detail).replace(/[?#].*$/, "");
+  var dramaId = detail && detail.__dramaId;
+  var number = Math.max(1, Number(selected && selected.number || 1));
+  var episodeId = selected && selected.id;
+  return basePage + "/Episode-" + number +
+    "?id=" + encodeURIComponent(dramaId) +
+    "&ep=" + encodeURIComponent(episodeId) +
+    "&page=0&pageSize=100";
+}
+
+function extractKkey(url) {
+  var match = String(url || "").match(/[?&]kkey=([^&#]+)/i);
+  if (!match) return "";
+  try { return decodeURIComponent(match[1]); } catch (_) { return match[1]; }
+}
+
+function captureVideoKeyFromKissKh(selected, detail) {
+  if (typeof globalThis !== "object" || !globalThis ||
+      typeof globalThis.webviewResolve !== "function") {
+    return Promise.reject(new Error("webviewResolve unavailable"));
+  }
+
+  var pageUrl = episodePageUrl(detail, selected);
+  var base = String(detail && detail.__baseUrl || BASE_URL || PRIMARY_BASE_URL).replace(/\/+$/, "");
+  var started = Date.now();
+
+  console.log("[KissKH] video key=webview-start host=" + base);
+  return globalThis.webviewResolve(pageUrl, {
+    referer: base + "/",
+    directLoad: true,
+    timeoutMs: WEBVIEW_KEY_TIMEOUT_MS,
+    finishAfterFirstMs: 120,
+    suppressPopups: true,
+    lockMainFrameHost: true,
+    interactionTexts: [
+      "episode " + Math.max(1, Number(selected && selected.number || 1)),
+      "play",
+      "watch"
+    ],
+    match: ["/api/DramaList/Episode/"]
+  }).then(function(result) {
+    var rows = result && Array.isArray(result.streams) ? result.streams : [];
+    for (var i = 0; i < rows.length; i++) {
+      var key = extractKkey(rows[i] && rows[i].url);
+      if (key) {
+        console.log("[KissKH] video key=webview elapsed=" +
+          (Date.now() - started) + "ms");
+        return key;
+      }
+    }
+    throw new Error("KissKH webview did not capture kkey");
+  });
+}
+
+function getLegacyVideoKey(episodeId) {
+  var url = LEGACY_VIDEO_KEY_API + encodeURIComponent(episodeId) +
+    "&version=" + encodeURIComponent(LEGACY_KISSKH_VERSION);
+  var started = Date.now();
+  return fetchJsonWithTimeout(url, {}, LEGACY_KEY_TIMEOUT_MS).then(function(data) {
+    if (!data || !data.key) throw new Error("Empty legacy KissKH video key");
+    console.log("[KissKH] video key=legacy-fallback elapsed=" +
+      (Date.now() - started) + "ms");
+    return String(data.key);
+  });
+}
+
+function getVideoKey(selected, detail, forceRefresh) {
   var cache = getVideoKeyCache();
   var now = Date.now();
   var age = cache.fetchedAt ? now - cache.fetchedAt : Infinity;
 
-  if (!forceRefresh && cache.key && age < VIDEO_KEY_CACHE_TTL_MS) {
-    console.log("[KissKH] video key=cache-hit age=" + age + "ms");
-    return Promise.resolve(cache.key);
+  if (!forceRefresh) {
+    var injected = readInjectedVideoKey();
+    if (injected) {
+      cache.key = injected;
+      cache.fetchedAt = now;
+      console.log("[KissKH] video key=injected");
+      return Promise.resolve(injected);
+    }
+
+    if (cache.key && age < VIDEO_KEY_CACHE_TTL_MS) {
+      console.log("[KissKH] video key=cache-hit age=" + age + "ms");
+      return Promise.resolve(cache.key);
+    }
+
+    if (cache.promise) {
+      console.log("[KissKH] video key=shared-inflight");
+      return cache.promise;
+    }
   }
 
-  if (!forceRefresh && cache.promise) {
-    console.log("[KissKH] video key=shared-inflight");
-    return cache.promise;
-  }
-
-  var url = VIDEO_KEY_API + encodeURIComponent(episodeId) +
-    "&version=" + encodeURIComponent(KISSKH_VERSION);
-  var started = Date.now();
-  var request = fetchJson(url, {}).then(function(data) {
-    if (!data || !data.key) throw new Error("Empty KissKH video key");
-    cache.key = data.key;
-    cache.fetchedAt = Date.now();
-    console.log("[KissKH] video key=remote elapsed=" +
-      (Date.now() - started) + "ms");
-    return data.key;
-  });
+  var episodeId = selected && selected.id;
+  var request = captureVideoKeyFromKissKh(selected, detail)
+    .catch(function(webviewError) {
+      console.log("[KissKH] video key webview miss reason=" +
+        String(webviewError && webviewError.message || webviewError));
+      return getLegacyVideoKey(episodeId);
+    })
+    .then(function(key) {
+      if (!key) throw new Error("Empty KissKH video key");
+      cache.key = key;
+      cache.fetchedAt = Date.now();
+      return key;
+    });
 
   cache.promise = request.then(function(key) {
     cache.promise = null;
@@ -635,12 +805,12 @@ function getStreams(tmdbId, mediaType, season, episode) {
     .then(function(detail) {
       var selected = selectEpisode(detail, type, season, episode);
       if (!selected || selected.id === undefined) throw new Error("KissKH episode ID is missing");
-      return getVideoKey(selected.id, false).then(function(key) {
+      return getVideoKey(selected, detail, false).then(function(key) {
         return getSources(selected.id, key).catch(function(error) {
           if (!isVideoKeyAuthError(error)) throw error;
           clearVideoKeyCache(key);
           console.log("[KissKH] video key rejected; refreshing once");
-          return getVideoKey(selected.id, true).then(function(freshKey) {
+          return getVideoKey(selected, detail, true).then(function(freshKey) {
             return getSources(selected.id, freshKey);
           });
         });

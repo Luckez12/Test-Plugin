@@ -1,20 +1,27 @@
-KissKH v1.0.12 — TV Season Matching Build
+KissKH v1.0.13 build
 
-Changes:
-- Keeps v1.0.10 exact-title movie lookup.
-- Keeps v1.0.11 reusable video-key cache.
-- Adds TV season-aware title matching for KissKH entries stored per season.
-- Example: VUEO "Reacher" S2 selects "Reacher - Season 2".
-- Season 1 accepts the bare base title and prefers an explicit "Season 1" entry when present.
-- Season 2+ requires an explicit matching season suffix.
-- Episode selection requires the requested episode number exactly.
-- Search remains one title query; season filtering is local and does not add search requests.
+Key changes:
+- Current primary host: https://kisskh.is
+- Exact-title movie selection retained.
+- TV base-title + requested-season selection retained.
+- Episode number must match exactly.
+- Video kkey resolution order:
+  1) injected/pre-generated key (when available)
+  2) VUEO webviewResolve capture from KissKH page/API request
+  3) in-runtime cache/shared in-flight request
+  4) bounded legacy Google Apps Script fallback
+- Cached key rejection (401/403) triggers one refresh.
+- Legacy key fallback timeout is bounded to avoid consuming the full provider timeout.
 
 Validation:
 - manifest valid
-- provider syntax valid
-- source/runtime byte-identical
-- Reacher S2E3 regression: 1 search, 1 detail, correct season/episode stream
+- providers/kisskh.js syntax valid
+- src/kisskh/index.js and providers/kisskh.js byte-identical
+- movie webview/cache regression PASS
+- Reacher S2E3 season/episode regression PASS
+- legacy fallback regression PASS
+- cached-key 403 refresh regression PASS
 
-Build note:
-- esbuild is not installed in this environment. src/kisskh/index.js and providers/kisskh.js are already byte-identical and self-contained, so the validated runtime provider is packaged directly.
+Note: esbuild was not installed in this workspace. The KissKH source is self-contained and
+src/kisskh/index.js is byte-identical to the validated runtime providers/kisskh.js, so the
+validated runtime file is packaged directly.

@@ -1,18 +1,7 @@
-# MovieBox v1.1.6 timing diagnostics
+# MovieBox v1.1.7
 
-No stream-selection behavior was changed from v1.1.5.
-
-Added elapsed timing logs for:
-- TMDB metadata
-- auth bootstrap / token cache hit
-- mobile search
-- each MovieBox resource request (2160/1080/720 path)
-- CDN byte-range probe
-- overall search stage
-- overall stream stage
-
-Existing behavior retained:
-- temporary session host-health routing
-- known quality below 720p rejected
-- Auto/Unknown accepted
-- 1080 -> 720 fallback
+- Removes the dedicated 2160p resource probe from the normal discovery path.
+- Requests 1080p first and falls back to 720p only when needed.
+- Still accepts an actual 2160p/4K resource if it is returned inside the 1080p resource response.
+- Preserves the v1.1.4 minimum-quality rule: known qualities below 720p are rejected; Auto/Unknown is allowed.
+- Preserves v1.1.5 session host-health routing and v1.1.6 timing diagnostics.

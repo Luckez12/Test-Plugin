@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.1.6";
+const VERSION = "1.1.7";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 var CryptoJS = null;
@@ -990,71 +990,15 @@ function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
 function multiQualityFastDirect(subjectId, mediaType, season, episode) {
   fastVerifyCache = {};
 
-  // MovieBox currently returns the same resource set for 2160/1080/720.
-  // Fetch once, then trust each item's actual resolution.
-  return fetchResolution(subjectId, mediaType, season, episode, 2160).then(function (items) {
-    var candidates = uniqueCandidates(items).filter(function (item) {
-      return /^https?:\/\//i.test(String(item && item.resourceLink || "")) &&
-        isAllowedResolution(item);
-    }).sort(function (a, b) {
-      var qa = actualResolution(a);
-      var qb = actualResolution(b);
-      if (qb !== qa) return qb - qa;
-      return directCandidateScore(b) - directCandidateScore(a);
+  // Current MovieBox resource flows are consistently useful at 1080p/720p.
+  // Do not spend a separate network round-trip probing 2160p. If the 1080p
+  // response itself contains an actual 2160p resource, isAllowedResolution()
+  // and directCandidateScore() will still allow and prefer it.
+  return resolveFastQuality(subjectId, mediaType, season, episode, 1080).then(function (stream) {
+    if (stream) return [stream];
+    return resolveFastQuality(subjectId, mediaType, season, episode, 720).then(function (fallbackStream) {
+      return fallbackStream ? [fallbackStream] : [];
     });
-
-    var seen = {};
-    var unique = [];
-    candidates.forEach(function (item) {
-      var fp = candidateFingerprint(item);
-      if (seen[fp]) return;
-      seen[fp] = true;
-      unique.push(item);
-    });
-
-    var actual = [];
-    unique.forEach(function (item) {
-      var q = qualityName(actualResolution(item));
-      if (actual.indexOf(q) < 0) actual.push(q);
-    });
-
-    console.log("[MovieBox] single resource request items=" + items.length +
-      " unique=" + unique.length +
-      " actual=" + (actual.length ? actual.join(",") : "none"));
-
-    function tryCandidate(i) {
-      if (i >= unique.length) return Promise.resolve([]);
-      return verifyCachedCandidate(unique[i], mediaType, 1).then(function (stream) {
-        if (stream) {
-          console.log("[MovieBox] READY q=" + stream.quality +
-            " host=" + hostOf(stream.url));
-          return [stream];
-        }
-        return tryCandidate(i + 1);
-      });
-    }
-
-    return tryCandidate(0);
-  }).catch(function (error) {
-    console.log("[MovieBox] single resource error=" +
-      (error && error.message ? error.message : String(error)));
-    return [];
-  }).then(function (streams) {
-    streams = streams || [];
-    if (streams.length) {
-      console.log("[MovieBox] fast ready=" + streams.map(function (s) {
-        return s.quality + ":" + hostOf(s.url);
-      }).join(","));
-      return streams;
-    }
-
-    function fallback(list, i) {
-      if (i >= list.length) return Promise.resolve([]);
-      return resolveFastQuality(subjectId, mediaType, season, episode, list[i]).then(function (stream) {
-        return stream ? [stream] : fallback(list, i + 1);
-      });
-    }
-    return fallback([1080, 720], 0);
   });
 }
 

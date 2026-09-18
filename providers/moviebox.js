@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.1.3";
+const VERSION = "1.1.4";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 var CryptoJS = null;
@@ -364,7 +364,8 @@ function fetchResolution(subjectId, mediaType, season, episode, resolution) {
       list.forEach(function (item) {
         item._requestedResolution = resolution;
         item._apiHost = result ? result.host : "";
-        if (!Number(item.resolution)) item.resolution = resolution;
+        // Keep the requested resolution only as request metadata. Do not
+        // promote an unknown API resolution to the requested quality.
         acc.push(item);
       });
       var hasMore = !!(data.pager && data.pager.hasMore);
@@ -459,7 +460,7 @@ function probeCandidate(item, index) {
       " totalMB=" + (bytes ? Math.round(bytes / 1048576) : 0) +
       " apiDuration=" + candidateDuration(item) +
       " apiSize=" + candidateSize(item) +
-      " resolution=" + Number(item.resolution || item._requestedResolution || 0));
+      " resolution=" + actualResolution(item));
     return { item: item, bytes: bytes, status: res.status, index: index };
   }).catch(function (error) {
     console.log("[MovieBox] CDN probe #" + index + " fail=" + (error && error.message ? error.message : String(error)));
@@ -518,8 +519,8 @@ function candidateRank(a, b) {
   var am = Number(a && a.requireMemberType || 0);
   var bm = Number(b && b.requireMemberType || 0);
   if (am !== bm) return am - bm;
-  var ar = Number(a && (a.resolution || a._requestedResolution) || 0);
-  var br = Number(b && (b.resolution || b._requestedResolution) || 0);
+  var ar = actualResolution(a);
+  var br = actualResolution(b);
   if (ar !== br) return br - ar;
   var ad = candidateDuration(a), bd = candidateDuration(b);
   if (ad !== bd) return bd - ad;
@@ -535,7 +536,7 @@ function resolveViaPlayInfo(items, subjectId, mediaType, season, episode) {
   function tryCandidate(i) {
     if (i >= candidates.length) return Promise.resolve([]);
     var item = candidates[i];
-    var resolution = Number(item.resolution || item._requestedResolution || 0);
+    var resolution = actualResolution(item);
     var resourceId = String(item.resourceId || "").trim();
     if (!resourceId) return tryCandidate(i + 1);
 
@@ -635,7 +636,7 @@ function resolveCurrentPlayInfo(items, subjectId, mediaType, season, episode) {
     var item = candidates[i];
     var resourceId = String(item.resourceId || "").trim();
     if (!resourceId) return tryOne(i + 1);
-    var resolution = Number(item.resolution || item._requestedResolution || 0) || 0;
+    var resolution = actualResolution(item);
     var apiHost = String(item._apiHost || API_HOSTS[0]);
     var apiHostName = apiHost.replace(/^https?:\/\//i, "");
     return apiCall(PATH_PLAY_INFO, "GET", {
@@ -673,6 +674,17 @@ function qualityName(value) {
   return q ? q + "p" : "Auto";
 }
 
+function actualResolution(item) {
+  var q = Number(item && item.resolution || 0);
+  return isFinite(q) && q > 0 ? q : 0;
+}
+
+function isAllowedResolution(item) {
+  var q = actualResolution(item);
+  // Unknown/Auto is allowed. Known qualities below 720p are not.
+  return q === 0 || q >= 720;
+}
+
 function waitMs(ms, value) {
   return new Promise(function (resolve) {
     setTimeout(function () { resolve(value); }, ms);
@@ -681,7 +693,7 @@ function waitMs(ms, value) {
 
 function directCandidateScore(item) {
   var score = 0;
-  var resolution = Number(item && (item.resolution || item._requestedResolution) || 0);
+  var resolution = actualResolution(item);
   var member = Number(item && item.requireMemberType || 0);
   var linkType = Number(item && item.linkType || 0);
   if (member === 0) score += 1000000000000;
@@ -705,11 +717,11 @@ function resolveDirectResources(items, mediaType) {
   // resourceLink flow and avoids returning duplicate mirrors for one quality.
   var byQuality = {};
   unique.forEach(function (item) {
-    var q = Number(item.resolution || item._requestedResolution || 0) || 0;
+    var q = actualResolution(item);
     if (!byQuality[q]) byQuality[q] = item;
   });
   var selected = Object.keys(byQuality).map(function (q) { return byQuality[q]; })
-    .sort(function (a, b) { return Number(b.resolution || b._requestedResolution || 0) - Number(a.resolution || a._requestedResolution || 0); })
+    .sort(function (a, b) { return actualResolution(b) - actualResolution(a); })
     .slice(0, 4);
 
   return Promise.all(selected.map(function (item, i) {
@@ -725,7 +737,7 @@ function resolveDirectResources(items, mediaType) {
       var validStatus = p.status === 200 || p.status === 206;
       var tinyMismatch = apiBytes >= 50 * 1024 * 1024 && actualBytes > 0 && actualBytes < minBytes;
       var likelyFull = actualBytes >= minBytes || (actualBytes === 0 && apiBytes >= minBytes);
-      var qn = Number(item.resolution || item._requestedResolution || 0);
+      var qn = actualResolution(item);
       console.log("[MovieBox] direct check q=" + qn +
         " host=" + hostOf(item.resourceLink) +
         " apiMB=" + Math.round(apiBytes / 1048576) +
@@ -778,7 +790,7 @@ function selectPlayableByActualSize(items, mediaType) {
     var best = usable[0];
     var item = best.item;
     var url = String(item.resourceLink || item.url || "").trim();
-    var resolution = Number(item.resolution || item._requestedResolution || 0);
+    var resolution = actualResolution(item);
     var quality = resolution ? resolution + "p" : "Auto";
     var actualMb = best.bytes ? Math.round(best.bytes / 1048576) : 0;
 
@@ -812,7 +824,7 @@ function verifyFastDirectCandidate(item, mediaType, index) {
     var validStatus = p.status === 200 || p.status === 206;
     var tinyMismatch = apiBytes >= 50 * 1024 * 1024 && actualBytes > 0 && actualBytes < minBytes;
     var likelyFull = actualBytes >= minBytes || (actualBytes === 0 && apiBytes >= minBytes);
-    var qn = Number(item.resolution || item._requestedResolution || 0);
+    var qn = actualResolution(item);
     var ok = validStatus && likelyFull && !tinyMismatch;
 
     console.log("[MovieBox] fast direct check q=" + qn +
@@ -840,7 +852,7 @@ var fastVerifyCache = {};
 
 function candidateFingerprint(item) {
   var url = String(item && item.resourceLink || "");
-  var q = Number(item && (item.resolution || item._requestedResolution) || 0);
+  var q = actualResolution(item);
   var size = candidateSize(item);
   var duration = candidateDuration(item);
   var host = hostOf(url);
@@ -866,7 +878,7 @@ function verifyCachedCandidate(item, mediaType, index) {
     fastVerifyCache[key] = verifyFastDirectCandidate(item, mediaType, index);
   } else {
     console.log("[MovieBox] reuse media fingerprint q=" +
-      qualityName(Number(item.resolution || item._requestedResolution || 0)) +
+      qualityName(actualResolution(item)) +
       " host=" + hostOf(url));
   }
   return fastVerifyCache[key];
@@ -875,14 +887,15 @@ function verifyCachedCandidate(item, mediaType, index) {
 function resolveFastQuality(subjectId, mediaType, season, episode, resolution) {
   return fetchResolution(subjectId, mediaType, season, episode, resolution).then(function (items) {
     var candidates = uniqueCandidates(items).filter(function (item) {
-      return /^https?:\/\//i.test(String(item && item.resourceLink || ""));
+      return /^https?:\/\//i.test(String(item && item.resourceLink || "")) &&
+        isAllowedResolution(item);
     }).sort(function (a, b) {
       return directCandidateScore(b) - directCandidateScore(a);
     }).slice(0, 2);
 
     var actualQualities = [];
     candidates.forEach(function (item) {
-      var q = qualityName(Number(item.resolution || item._requestedResolution || 0));
+      var q = qualityName(actualResolution(item));
       if (actualQualities.indexOf(q) < 0) actualQualities.push(q);
     });
     console.log("[MovieBox] request " + qualityName(resolution) +
@@ -918,10 +931,11 @@ function multiQualityFastDirect(subjectId, mediaType, season, episode) {
   // Fetch once, then trust each item's actual resolution.
   return fetchResolution(subjectId, mediaType, season, episode, 2160).then(function (items) {
     var candidates = uniqueCandidates(items).filter(function (item) {
-      return /^https?:\/\//i.test(String(item && item.resourceLink || ""));
+      return /^https?:\/\//i.test(String(item && item.resourceLink || "")) &&
+        isAllowedResolution(item);
     }).sort(function (a, b) {
-      var qa = Number(a && (a.resolution || a._requestedResolution) || 0);
-      var qb = Number(b && (b.resolution || b._requestedResolution) || 0);
+      var qa = actualResolution(a);
+      var qb = actualResolution(b);
       if (qb !== qa) return qb - qa;
       return directCandidateScore(b) - directCandidateScore(a);
     });
@@ -937,7 +951,7 @@ function multiQualityFastDirect(subjectId, mediaType, season, episode) {
 
     var actual = [];
     unique.forEach(function (item) {
-      var q = qualityName(Number(item.resolution || item._requestedResolution || 0));
+      var q = qualityName(actualResolution(item));
       if (actual.indexOf(q) < 0) actual.push(q);
     });
 
@@ -977,7 +991,7 @@ function multiQualityFastDirect(subjectId, mediaType, season, episode) {
         return stream ? [stream] : fallback(list, i + 1);
       });
     }
-    return fallback([1080, 720, 480], 0);
+    return fallback([1080, 720], 0);
   });
 }
 

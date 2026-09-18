@@ -1,0 +1,15 @@
+{
+  "name": "vueo-provider-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Runtime dependency metadata for VUEO providers",
+  "scripts": {
+    "validate": "node scripts/validate-manifest.js",
+    "test:provider": "node tests/test-provider.js",
+    "test:kisskh": "node tests/test-kisskh-regression.js"
+  },
+  "dependencies": {
+    "cheerio-without-node-native": "0.20.2",
+    "crypto-js": "4.2.0"
+  }
+}

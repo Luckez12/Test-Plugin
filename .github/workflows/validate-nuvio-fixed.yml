@@ -1,4 +1,4 @@
-name: Validate Nuvio Plugin
+name: Validate Provider Repository
 
 on:
   workflow_run:
@@ -6,45 +6,69 @@ on:
       - "Apply ZIP Patch"
     types:
       - completed
+  push:
+    branches:
+      - main
+    paths:
+      - "manifest.json"
+      - "providers/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/validate-nuvio-fixed.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "manifest.json"
+      - "providers/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/validate-nuvio-fixed.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: validate-nuvio-after-zip-patch
-  cancel-in-progress: false
+  group: validate-provider-repository-${{ github.event_name }}-${{ github.ref || github.event.workflow_run.id }}
+  cancel-in-progress: true
 
 jobs:
   validate:
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
-      - name: Checkout latest main
+      - name: Checkout latest main after ZIP patch
+        if: github.event_name == 'workflow_run'
         uses: actions/checkout@v4
         with:
           ref: main
 
+      - name: Checkout current revision
+        if: github.event_name != 'workflow_run'
+        uses: actions/checkout@v4
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
-      - name: Install dependencies
-        if: ${{ hashFiles('package.json') != '' }}
+      - name: Install runtime dependencies
         run: npm install --no-audit --no-fund
 
-      - name: Build providers
-        if: ${{ hashFiles('package.json') != '' }}
+      - name: Check provider syntax
         shell: bash
         run: |
-          if node -e "const p=require('./package.json'); process.exit(p.scripts && p.scripts.build ? 0 : 1)"; then
-            npm run build
-          else
-            echo "No build script. Skipping build."
-          fi
+          set -euo pipefail
+          for file in providers/*.js; do
+            echo "Checking $file"
+            node --check "$file"
+          done
 
-      - name: Validate manifest
-        run: node scripts/validate-manifest.js
+      - name: Validate manifest and provider exports
+        run: npm run validate

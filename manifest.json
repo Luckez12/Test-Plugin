@@ -180,7 +180,7 @@
       "id": "moviebox",
       "name": "MovieBox",
       "description": "MovieBox fast direct provider with 720p+ known-quality filtering, Auto/unknown support, and session host-health routing",
-      "version": "1.1.5",
+      "version": "1.1.6",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

@@ -1,7 +1,18 @@
-# MovieBox v1.1.5
+# MovieBox v1.1.6 timing diagnostics
 
-- Keeps MovieBox host list intact.
-- Marks 407/timeout/network-failed hosts unhealthy only for the current runtime session.
-- Prioritizes the last successful API host for later search/resource calls.
-- Resets host-health state naturally when the provider runtime restarts.
-- Preserves v1.1.4 quality rules: known <720p rejected; Auto/Unknown accepted.
+No stream-selection behavior was changed from v1.1.5.
+
+Added elapsed timing logs for:
+- TMDB metadata
+- auth bootstrap / token cache hit
+- mobile search
+- each MovieBox resource request (2160/1080/720 path)
+- CDN byte-range probe
+- overall search stage
+- overall stream stage
+
+Existing behavior retained:
+- temporary session host-health routing
+- known quality below 720p rejected
+- Auto/Unknown accepted
+- 1080 -> 720 fallback

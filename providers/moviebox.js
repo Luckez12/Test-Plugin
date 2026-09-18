@@ -1,5 +1,5 @@
 const PROVIDER = "MovieBox";
-const VERSION = "1.1.4";
+const VERSION = "1.1.5";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
 var CryptoJS = null;
@@ -35,8 +35,49 @@ const FORWARDED_IP = "";
 var SESSION = {
   token: null,
   deviceId: randomHex(32),
-  gaid: randomUuid()
+  gaid: randomUuid(),
+  preferredHost: null,
+  badHosts: {}
 };
+
+function hostErrorLooksTransient(error) {
+  var message = String(error && error.message ? error.message : error || "").toLowerCase();
+  return /407|http_proxy_auth|timeout|timed out|abort|network|failed to fetch|econn|enotfound|socket|connection/.test(message);
+}
+
+function markHostBad(host, reason) {
+  host = String(host || "");
+  if (!host) return;
+  SESSION.badHosts[host] = true;
+  if (SESSION.preferredHost === host) SESSION.preferredHost = null;
+  console.log("[MovieBox] host unhealthy host=" + host + " reason=" + String(reason || "transient-error"));
+}
+
+function markHostGood(host) {
+  host = String(host || "");
+  if (!host) return;
+  delete SESSION.badHosts[host];
+  SESSION.preferredHost = host;
+}
+
+function orderedApiHosts() {
+  var out = [];
+  var preferred = String(SESSION.preferredHost || "");
+  if (preferred && API_HOSTS.indexOf(preferred) >= 0 && !SESSION.badHosts[preferred]) out.push(preferred);
+  API_HOSTS.forEach(function (host) {
+    if (host === preferred || SESSION.badHosts[host]) return;
+    out.push(host);
+  });
+
+  // Keep failures session-local, but avoid permanently dead-ending if every
+  // host has been marked unhealthy. A full runtime restart also resets this.
+  if (!out.length) {
+    SESSION.badHosts = {};
+    SESSION.preferredHost = null;
+    return API_HOSTS.slice();
+  }
+  return out;
+}
 
 function randomHex(length) {
   var out = "";
@@ -240,14 +281,20 @@ function signedAttempt(host, path, method, params, bodyObj, token) {
 
 function bootstrapToken() {
   if (SESSION.token) return Promise.resolve(SESSION.token);
+  var hosts = orderedApiHosts();
 
   function tryHost(i) {
-    if (i >= API_HOSTS.length) return Promise.resolve(null);
-    var host = API_HOSTS[i];
+    if (i >= hosts.length) return Promise.resolve(null);
+    var host = hosts[i];
     return signedAttempt(host, PATH_BOOTSTRAP, "GET", { page: 1, tabId: 0, version: "" }, null, null)
       .then(function (result) {
+        if (result.status === 407) {
+          markHostBad(host, "http-407");
+          return tryHost(i + 1);
+        }
         if (result.token) {
           SESSION.token = result.token;
+          markHostGood(host);
           console.log("[MovieBox] auth bootstrap host=" + host + " status=" + result.status + " token=yes");
           return SESSION.token;
         }
@@ -255,6 +302,7 @@ function bootstrapToken() {
         return tryHost(i + 1);
       })
       .catch(function (error) {
+        if (hostErrorLooksTransient(error)) markHostBad(host, error && error.message ? error.message : String(error));
         console.log("[MovieBox] auth bootstrap fail host=" + host + " error=" + (error && error.message ? error.message : String(error)));
         return tryHost(i + 1);
       });
@@ -266,21 +314,28 @@ function bootstrapToken() {
 function apiCall(path, method, params, bodyObj) {
   return bootstrapToken().then(function (token) {
     if (!token) throw new Error("auth bootstrap failed");
+    var hosts = orderedApiHosts();
 
     function tryHost(i) {
-      if (i >= API_HOSTS.length) return Promise.resolve(null);
-      var host = API_HOSTS[i];
+      if (i >= hosts.length) return Promise.resolve(null);
+      var host = hosts[i];
       return signedAttempt(host, path, method, params, bodyObj, SESSION.token)
         .then(function (result) {
           if (result.token) SESSION.token = result.token;
+          if (result.status === 407) {
+            markHostBad(host, "http-407");
+            return tryHost(i + 1);
+          }
           var payload = result.json || {};
           if (result.ok && Number(payload.code) === 0) {
+            markHostGood(host);
             return { host: host, data: payload.data || null };
           }
           console.log("[MovieBox] api fail host=" + host + " path=" + path + " status=" + result.status + " code=" + String(payload.code == null ? "?" : payload.code));
           return tryHost(i + 1);
         })
         .catch(function (error) {
+          if (hostErrorLooksTransient(error)) markHostBad(host, error && error.message ? error.message : String(error));
           console.log("[MovieBox] api error host=" + host + " path=" + path + " error=" + (error && error.message ? error.message : String(error)));
           return tryHost(i + 1);
         });

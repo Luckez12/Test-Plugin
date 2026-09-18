@@ -1,8 +1,7 @@
-# MovieBox v1.1.4
+# MovieBox v1.1.5
 
-- Accept known 720p, 1080p, 2160p+ streams.
-- Reject known 480p/360p/240p streams.
-- Keep Auto/Unknown streams eligible.
-- Do not label unknown streams with the requested resolution.
-- Fallback only through 1080p -> 720p.
-- Search/title/TV matching logic unchanged.
+- Keeps MovieBox host list intact.
+- Marks 407/timeout/network-failed hosts unhealthy only for the current runtime session.
+- Prioritizes the last successful API host for later search/resource calls.
+- Resets host-health state naturally when the provider runtime restarts.
+- Preserves v1.1.4 quality rules: known <720p rejected; Auto/Unknown accepted.

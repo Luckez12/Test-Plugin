@@ -1,0 +1,29 @@
+PencuriMovie JS v1.0.6 - HGCloud/Voe extraction repair from original v1.0.2
+
+Replace providers/pencurimovie.js and manifest.json at the existing Test-Plugin repository root.
+Optional regression test: tests/test-pencurimovie-extraction.js.
+This patch is based on the rolled-back latest repo (9), identical to the original repo (8). It does not reintroduce v1.0.3-v1.0.5 scan/race code.
+
+Observed causes:
+- Captured Voe player JSON decodes successfully with the existing algorithm, but its source uses /engine/hls2/ and direct_access_url uses /engine/download/ without .m3u8/.mp4. Original isLikelyStreamUrl rejects both.
+- The same Voe HTML also contains a dummy Big Buck Bunny test-video source, so generic scraping is not a valid Voe fallback.
+- Captured hgcloud.to response is a loader with an external main.js. The original host recognition does not identify hgcloud.to, so it falls outside the selected top-six mirrors.
+- Working Cloudstream HGCloud extractor tries hanerix.com, audinifer.com, vibuxer.com with the same video ID. Captured hanerix native page contains packed playlist fields.
+
+Changes:
+- Accept HTTP(S) source/direct_access_url fields owned by the decrypted Voe payload, including extensionless engine URLs. Preserve exact tokens/queries. Do not broaden global URL scanning.
+- Read raw application/json script bodies rather than relying on the Android selector bridge for script text; try later valid payloads if the first script is unrelated.
+- Follow bounded quoted Voe redirects and recognize current alias. Carry HLS Origin=https://voe.sx and Referer=https://voe.sx/ like the Cloudstream Voe extractor.
+- Recognize HGCloud domains at the existing StreamWish host priority so the original six-slot selection can include HGCloud. The top-six selection itself remains unchanged.
+- Read original HGCloud page first; if it is a loader, try the Cloudstream native mirrors in order, preserving video ID/query. Unpack scripts without executing remote JavaScript and use native .m3u8 fields, including relative URLs.
+- No race, timeout changes, native-master probing pipeline, search changes, or MSM changes. getStreams, resolveMirrors and fetchResponse verified identical to v1.0.2.
+- Existing default formatStreams naming/quality behavior retained.
+
+Validation:
+node --check providers/pencurimovie.js
+node scripts/validate-manifest.js
+node tests/test-pencurimovie-extraction.js
+10 mocked regression checks passed.
+Replayed captured live Voe/HGCloud responses against the new extractors: 2 Voe sources and 2 HGCloud playlist URLs extracted. Live responses were fetched separately in this environment; they may differ from Android responses. Captured signed URLs are excluded from this deliverable. Actual app playback still requires testing.
+
+Separate 5-second live playlist fetches for the first Voe/HGCloud URLs both timed out in this environment. Playlist contents and actual playback were not verified by those probes; extraction evidence is limited to returned URLs from captured player pages. This diagnostic probe does not change any provider timeout.

@@ -1,6 +1,6 @@
 {
   "name": "Luckez12 Plugins",
-  "version": "1.7.11",
+  "version": "1.7.15",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -154,7 +154,7 @@
       "id": "pencurimovie",
       "name": "PencuriMovie",
       "description": "PencuriMovie movies and TV series provider",
-      "version": "1.0.2",
+      "version": "1.0.6",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

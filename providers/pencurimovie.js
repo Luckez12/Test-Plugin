@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.0.2";
+const VERSION = "1.0.6";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -673,20 +673,49 @@ function resolveMixDrop(url, referer) {
   }).catch(function () { return []; });
 }
 
-function resolveStreamWish(url, referer) {
-  if (!/(?:streamwish|hglink|wish|filelions|filelion|rapidplayers|dwish|embedwish|flaswish|cdnwish|hlswish|vidhide|vidhidepro|filemoon)/i.test(url)) {
-    return Promise.resolve([]);
-  }
+function isHgCloud(url) {
+  return /^(?:www\.)?(?:hgcloud\.to|hglink\.to|dhcplay\.com|gradehgplus\.com|hanerix\.com|audinifer\.com|vibuxer\.com)$/i.test(hostOf(url));
+}
 
-  return fetchText(url, {
-    headers: { "Accept": "text/html,*/*", "Referer": referer || url, "User-Agent": USER_AGENT }
-  }).then(function (html) {
-    var unpacked = unpackPacker(html);
-    var candidates = mediaUrlsFromText(unpacked, url);
-    return candidates.map(function (streamUrl) {
-      return { url: streamUrl, referer: url, label: "StreamHost" };
-    });
-  }).catch(function () { return []; });
+function packedPlayerStreams(response, label) {
+  var unpacked = unpackPacker(response.text);
+  var candidates = {};
+  var re = /["']?(?:hls[234]|file)["']?\s*:\s*["']([^"']+)["']/gi;
+  var match;
+  while ((match = re.exec(unpacked))) {
+    var value = decodeHtmlEntities(match[1]).replace(/\\u0026/gi, "&").replace(/\\u003d/gi, "=");
+    var url = absoluteUrl(response.url, value);
+    // HGCloud hls3 may be an obfuscated master.txt; use native playlists only.
+    if (/^https?:\/\//i.test(url) && /\.m3u8$/i.test(url.split(/[?#]/)[0])) candidates[url] = true;
+  }
+  if (!Object.keys(candidates).length) mediaUrlsFromText(unpacked, response.url).forEach(function (url) { candidates[url] = true; });
+  return Object.keys(candidates).map(function (url) {
+    return { url: url, referer: response.url, label: label };
+  });
+}
+
+function resolveStreamWish(url, referer) {
+  var hg = isHgCloud(url);
+  if (!hg && !/(?:streamwish|wish|filelions|filelion|rapidplayers|dwish|embedwish|flaswish|cdnwish|hlswish|vidhide|vidhidepro|filemoon)/i.test(url)) return Promise.resolve([]);
+  function load(target) {
+    return fetchResponse(target, {
+      headers: { "Accept": "text/html,*/*", "Referer": referer || url, "User-Agent": USER_AGENT }
+    }).then(function (response) { return packedPlayerStreams(response, hg ? "HGCloud" : "StreamHost"); }).catch(function () { return []; });
+  }
+  return load(url).then(function (streams) {
+    if (streams.length || !hg || !/^(hgcloud\.to|hglink\.to|dhcplay\.com|gradehgplus\.com)$/i.test(hostOf(url))) return streams;
+    var match = String(url).match(/^https?:\/\/[^/]+\/(?:e\/|f\/)?([A-Za-z0-9_-]+)\/?(\?[^#]*)?(?:#.*)?$/);
+    if (!match) return [];
+    // Native mirrors from the working Cloudstream HGCloud extractor; preserve video ID/query.
+    var hosts = ["hanerix.com", "audinifer.com", "vibuxer.com"];
+    function next(index) {
+      if (index >= hosts.length) return Promise.resolve([]);
+      return load("https://" + hosts[index] + "/e/" + match[1] + (match[2] || "")).then(function (found) {
+        return found.length ? found : next(index + 1);
+      });
+    }
+    return next(0);
+  });
 }
 
 function rot13(value) {
@@ -744,37 +773,61 @@ function decryptVoe(encoded) {
   }
 }
 
-function resolveVoe(url, referer) {
-  if (!/(?:voe\.|voe\.sx|tubeless|simpulum|urochs|nathanfromsubject|yip\.su|metagnath|donaldlineelse|charlestoughrace)/i.test(url)) {
-    return Promise.resolve([]);
+function voeJsonPayloads(html) {
+  // Read raw script bodies: Android's HTML selector bridge may normalize script text.
+  var found = [];
+  var scripts = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  var match;
+  while ((match = scripts.exec(String(html || "")))) {
+    if (/\btype\s*=\s*(?:["']application\/json["']|application\/json)(?:\s|$)/i.test(match[1])) found.push(match[2].trim());
   }
+  return found;
+}
 
-  function load(target) {
+function voeMediaUrl(value, base) {
+  // Accept decoder-owned source fields even when the current engine omits .m3u8/.mp4.
+  // Do not scrape arbitrary page URLs: Voe embeds a dummy test video on the same page.
+  var raw = decodeHtmlEntities(String(value || "")).replace(/\\u0026/gi, "&").replace(/\\u003d/gi, "=").replace(/\\\//g, "/").trim();
+  if (!raw || /^(?!https?:)[a-z][a-z0-9+.-]*:/i.test(raw)) return "";
+  var url = absoluteUrl(base, raw);
+  return /^https?:\/\//i.test(url) ? url : "";
+}
+
+function resolveVoe(url, referer) {
+  if (!/(?:voe\.|tubeless|simpulum|urochs|nathanfromsubject|yip\.su|metagnath|donaldlineelse|charlestoughrace|jeremyparticipantanything)/i.test(hostOf(url))) return Promise.resolve([]);
+  function load(target, depth) {
     return fetchResponse(target, {
-      headers: { "Accept": "text/html,*/*", "Referer": referer || target, "User-Agent": USER_AGENT }
+      headers: { "Accept": "text/html,*/*", "Referer": referer || url, "User-Agent": USER_AGENT }
+    }).then(function (response) {
+      var redirect = response.text.match(/window\.location(?:\.href)?\s*=\s*["'](https?:\/\/[^"']+)["']/i);
+      if (redirect && depth < 2 && redirect[1] !== response.url) return load(absoluteUrl(response.url, redirect[1]), depth + 1);
+      return response;
     });
   }
-
-  return load(url).then(function (response) {
-    var redirect = response.text.match(/window\.location\.href\s*=\s*'([^']+)'/i);
-    return redirect ? load(absoluteUrl(response.url || url, redirect[1])) : response;
-  }).then(function (response) {
-    var cheerio = getCheerio();
-    var $ = cheerio.load(response.text);
-    var raw = $("script[type='application/json']").first().text().trim();
-    if (!raw) return [];
-    var encoded = raw;
-    try {
-      var parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length) encoded = String(parsed[0] || "");
-    } catch (_) {
-      encoded = raw.replace(/^\s*\[\s*"/, "").replace(/"\s*\]\s*$/, "");
-    }
-    var data = decryptVoe(encoded);
-    if (!data) return [];
+  return load(url, 0).then(function (response) {
     var out = [];
-    if (data.source && isLikelyStreamUrl(data.source)) out.push({ url: data.source, referer: response.url || url, label: "VOE" });
-    if (data.direct_access_url && isLikelyStreamUrl(data.direct_access_url)) out.push({ url: data.direct_access_url, referer: response.url || url, label: "VOE MP4" });
+    var seen = {};
+    voeJsonPayloads(response.text).forEach(function (raw) {
+      var encoded = raw;
+      try {
+        var parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) encoded = String(parsed[0] || "");
+        else if (typeof parsed === "string") encoded = parsed;
+        else return;
+      } catch (_) { return; }
+      var data = decryptVoe(encoded);
+      if (!data) return;
+      function add(value, label, hls) {
+        var media = voeMediaUrl(value, response.url);
+        if (!media || seen[media]) return;
+        seen[media] = true;
+        out.push({ url: media, referer: hls ? "https://voe.sx/" : response.url, label: label,
+          headers: hls ? { "Origin": "https://voe.sx" } : {} });
+      }
+      add(data.source, "VOE", true);
+      add(data.direct_access_url, "VOE MP4", false);
+    });
+    console.log("[PencuriMovie] VOE decoded sources=" + out.length);
     return out;
   }).catch(function () { return []; });
 }
@@ -890,7 +943,7 @@ function mirrorPriority(mirror) {
   var value = (String(mirror && mirror.label || "") + " " + String(mirror && mirror.url || "")).toLowerCase();
   if (isLikelyStreamUrl(mirror.url)) return 0;
   if (/playmate|playm/.test(value)) return 1;
-  if (/streamwish|hglink|wish|filelion|vidhide|filemoon/.test(value)) return 2;
+  if (isHgCloud(mirror.url) || /streamwish|wish|filelion|vidhide|filemoon/.test(value)) return 2;
   if (/voe/.test(value)) return 3;
   if (/mixdrop|mxdrop/.test(value)) return 4;
   if (/dsvplay|dood/.test(value)) return 5;

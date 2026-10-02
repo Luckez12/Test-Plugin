@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.0.6";
+const VERSION = "1.0.7";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -450,6 +450,20 @@ function collectEmbedUrls(html, pageUrl) {
     if (originOf(url) === originOf(pageUrl) && url.split("#")[0] === pageUrl.split("#")[0]) return;
     if (!found[url]) found[url] = label || "Server";
   }
+
+  // Read tab targets first so website server numbers survive generic discovery.
+  $(".player_nav .idTabs a[href]").each(function (_, el) {
+    var tab = $(el);
+    var target = String(tab.attr("href") || "");
+    if (!/^#[A-Za-z0-9_-]+$/.test(target)) return;
+    var label = tab.closest("li").find(".les-title strong").first().text() || tab.text() || "Server";
+    $(target).find("iframe, [data-src], [data-video], [data-url], [data-embed], [data-link]").each(function (_, frame) {
+      var node = $(frame);
+      ["data-src", "src", "data-video", "data-url", "data-embed", "data-link"].forEach(function (attr) {
+        add(node.attr(attr), String(label).replace(/\s+/g, " ").trim());
+      });
+    });
+  });
 
   var selectors = [
     "div.movieplay iframe",
@@ -980,158 +994,6 @@ function resolveMirror(mirror, pageUrl, depth) {
     });
 }
 
-function probeDoodStream(stream) {
-  var url = String(stream && stream.url || "").trim();
-  if (!url) {
-    return Promise.resolve({
-      stream: stream,
-      ok: false,
-      status: 0,
-      contentType: "",
-      totalSize: 0,
-      hasFtyp: false,
-      score: 0
-    });
-  }
-
-  var headers = {};
-  var supplied = stream.headers || {};
-  Object.keys(supplied).forEach(function (key) { headers[key] = supplied[key]; });
-  if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
-  if (!headers["Accept"]) headers["Accept"] = "*/*";
-  if (!headers["Referer"] && !headers["referer"]) {
-    headers["Referer"] = stream.referer || "https://dsvplay.com/";
-  }
-  headers["Range"] = "bytes=0-4095";
-
-  return fetch(url, {
-    method: "GET",
-    headers: headers
-  }).then(function (res) {
-    var status = res ? Number(res.status || 0) : 0;
-    var contentType = "";
-    var contentRange = "";
-    var contentLength = "";
-    try {
-      if (res && res.headers && res.headers.get) {
-        contentType = String(res.headers.get("content-type") || "").toLowerCase();
-        contentRange = String(res.headers.get("content-range") || "");
-        contentLength = String(res.headers.get("content-length") || "");
-      }
-    } catch (_) {}
-
-    var totalSize = 0;
-    var rangeMatch = contentRange.match(/\/(\d+)\s*$/);
-    if (rangeMatch) totalSize = Number(rangeMatch[1] || 0);
-    if (!totalSize && contentLength && status === 200) totalSize = Number(contentLength || 0);
-
-    var okStatus = status === 200 || status === 206;
-    var looksLikeError = /text\/html|application\/json|text\/plain/.test(contentType);
-    var baseOk = okStatus && !looksLikeError;
-
-    function finishProbe(hasFtyp) {
-      var sizeOk = !totalSize || totalSize >= 5 * 1024 * 1024;
-      var ok = baseOk && sizeOk;
-      var score = 0;
-      if (ok) score += 1000;
-      if (hasFtyp) score += 500;
-      if (totalSize > 0) score += Math.min(400, Math.floor(totalSize / (1024 * 1024)));
-
-      console.log(
-        "[PencuriMovie] DSV probe status=" + status +
-        " type='" + contentType + "'" +
-        " size=" + totalSize +
-        " ftyp=" + hasFtyp +
-        " ok=" + ok
-      );
-
-      return {
-        stream: stream,
-        ok: ok,
-        status: status,
-        contentType: contentType,
-        totalSize: totalSize,
-        hasFtyp: hasFtyp,
-        score: score
-      };
-    }
-
-    if (!baseOk || !res || typeof res.arrayBuffer !== "function") {
-      return finishProbe(false);
-    }
-
-    return res.arrayBuffer().then(function (buffer) {
-      var bytes = new Uint8Array(buffer || new ArrayBuffer(0));
-      var limit = Math.min(bytes.length, 64);
-      var ascii = "";
-      for (var i = 0; i < limit; i++) {
-        var code = bytes[i];
-        ascii += code >= 32 && code <= 126 ? String.fromCharCode(code) : ".";
-      }
-      return finishProbe(ascii.indexOf("ftyp") >= 0);
-    }).catch(function () {
-      return finishProbe(false);
-    });
-  }).catch(function (error) {
-    console.log("[PencuriMovie] DSV probe failed=" + (error && error.message ? error.message : String(error)));
-    return {
-      stream: stream,
-      ok: false,
-      status: 0,
-      contentType: "",
-      totalSize: 0,
-      hasFtyp: false,
-      score: 0
-    };
-  });
-}
-
-function filterDeadDoodStreams(streams) {
-  var list = streams || [];
-  var doodIndexes = [];
-
-  list.forEach(function (stream, index) {
-    var label = String(stream && stream.label || "").toLowerCase();
-    if (/dood|dsv/.test(label)) doodIndexes.push(index);
-  });
-
-  if (doodIndexes.length < 2) return Promise.resolve(list);
-
-  return Promise.all(doodIndexes.map(function (index) {
-    return probeDoodStream(list[index]).then(function (result) {
-      result.index = index;
-      return result;
-    });
-  })).then(function (results) {
-    var passing = results.filter(function (result) { return result.ok; });
-
-    if (!passing.length) {
-      console.log("[PencuriMovie] DSV probe inconclusive, keeping first DSV only");
-      var fallbackIndex = doodIndexes[0];
-      return list.filter(function (stream, index) {
-        return doodIndexes.indexOf(index) === -1 || index === fallbackIndex;
-      });
-    }
-
-    passing.sort(function (a, b) {
-      if (b.score !== a.score) return b.score - a.score;
-      if (b.totalSize !== a.totalSize) return b.totalSize - a.totalSize;
-      return a.index - b.index;
-    });
-
-    var best = passing[0];
-    console.log(
-      "[PencuriMovie] DSV selected=1/" + doodIndexes.length +
-      " size=" + Number(best.totalSize || 0) +
-      " ftyp=" + !!best.hasFtyp
-    );
-
-    return list.filter(function (stream, index) {
-      return doodIndexes.indexOf(index) === -1 || index === best.index;
-    });
-  });
-}
-
 function qualityFromUrl(url) {
   var value = String(url || "").toLowerCase();
   var m = value.match(/(?:^|[^0-9])(2160|1440|1080|720|480|360)p?(?:[^0-9]|$)/);
@@ -1146,23 +1008,13 @@ function formatStreams(streams) {
 
   streams.forEach(function (stream) {
     var url = String(stream && stream.url || "").trim();
-    if (!url || seen[url]) return;
-    seen[url] = true;
+    var key = String(stream.choiceId || "") + "|" + url;
+    if (!url || seen[key]) return;
+    seen[key] = true;
 
-    var quality = qualityFromUrl(url);
+    var quality = stream.hlsVerified ? "Auto" : qualityFromUrl(url);
     var label = String(stream.label || "Server").trim();
-    var headers = {};
-    var supplied = stream.headers || {};
-    Object.keys(supplied).forEach(function (key) { headers[key] = supplied[key]; });
-    if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
-    if (!headers["Accept"]) headers["Accept"] = "*/*";
-
-    if (!stream.noReferer) {
-      headers["Referer"] = stream.referer || headers["Referer"] || originOf(url) + "/";
-    } else {
-      delete headers["Referer"];
-      delete headers["referer"];
-    }
+    var headers = checkHeaders(stream);
 
     out.push({
       name: PROVIDER,
@@ -1176,10 +1028,130 @@ function formatStreams(streams) {
   return out;
 }
 
+// The same short validation budget applies to every host/candidate.
+const MEDIA_CHECK_MS = 2000;
+function checkedRequest(url, options, read) {
+  var controller = typeof AbortController === "function" ? new AbortController() : null;
+  var opts = Object.assign({}, options || {});
+  if (controller) opts.signal = controller.signal;
+  var cancel;
+  var request = new Promise(function (resolve) {
+    var settled = false;
+    var timer;
+    cancel = function () {
+      if (settled) return;
+      settled = true; clearTimeout(timer);
+      if (controller) controller.abort();
+      resolve(null);
+    };
+    timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      if (controller) controller.abort();
+      resolve(null);
+    }, MEDIA_CHECK_MS);
+    Promise.resolve().then(function () { return fetch(url, opts); }).then(read).then(function (result) {
+      if (settled) return;
+      settled = true; clearTimeout(timer); resolve(result);
+    }, function () {
+      if (settled) return;
+      settled = true; clearTimeout(timer); resolve(null);
+    });
+  });
+  request.cancel = function () { cancel(); };
+  return request;
+}
+
+function checkHeaders(stream) {
+  var headers = Object.assign({}, stream.headers || {});
+  if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
+  if (!headers.Accept) headers.Accept = "*/*";
+  if (stream.noReferer) { delete headers.Referer; delete headers.referer; }
+  else if (!headers.Referer && !headers.referer) headers.Referer = stream.referer || originOf(stream.url) + "/";
+  return headers;
+}
+
+function isHlsStream(stream) {
+  return /\.m3u8(?:[?#]|$)|\/engine\/hls\d*\//i.test(stream.url) || String(stream.label || "").toUpperCase() === "VOE";
+}
+
+function checkMedia(stream, hls) {
+  var headers = checkHeaders(stream);
+  if (!hls) headers.Range = "bytes=0-0";
+  return checkedRequest(stream.url, { headers: headers }, function (res) {
+    if (!res || (res.status !== 200 && res.status !== 206)) return null;
+    if (hls) return res.text().then(function (body) {
+      var text = String(body || "").replace(/^\uFEFF/, "").trim();
+      if (!/^#EXTM3U(?:\r?\n|$)/.test(text)) return null;
+      var media = /^#EXTINF:/m.test(text) && /^(?!#)\S+/m.test(text);
+      var lines = text.split(/\r?\n/).map(function (line) { return line.trim(); });
+      var master = lines.some(function (line, index) {
+        if (!/^#EXT-X-STREAM-INF:/.test(line)) return false;
+        var next = index + 1;
+        while (next < lines.length && (!lines[next] || lines[next][0] === "#")) next++;
+        return next < lines.length && !/^(?!https?:)[a-z][a-z0-9+.-]*:/i.test(lines[next]) && /^https?:\/\//i.test(absoluteUrl(res.url || stream.url, lines[next]));
+      });
+      if (!media && !master) return null;
+      return Object.assign({}, stream, { hlsVerified: true });
+    });
+    var type = res.headers && res.headers.get ? String(res.headers.get("content-type") || "").toLowerCase() : "";
+    var range = res.headers && res.headers.get ? String(res.headers.get("content-range") || "") : "";
+    var total = range.match(/\/(\d+)$/);
+    if (res.body && typeof res.body.cancel === "function") Promise.resolve(res.body.cancel()).catch(function () {});
+    if (!/^video\//.test(type) && !(/^application\/octet-stream/.test(type) && total && Number(total[1]) >= 65536)) return null;
+    return stream;
+  });
+}
+
+function firstChecked(candidates, hls) {
+  // First valid response wins within this website choice only. Empty/error cannot win.
+  return new Promise(function (resolve) {
+    if (!candidates.length) { resolve(null); return; }
+    var pending = candidates.length;
+    var won = false;
+    var probes = candidates.map(function (stream) { return checkMedia(stream, hls); });
+    probes.forEach(function (probe) {
+      probe.then(function (checked) {
+        if (checked && !won) {
+          won = true; resolve(checked);
+          probes.forEach(function (other) { if (other !== probe && other.cancel) other.cancel(); });
+        }
+        pending--;
+        if (!pending && !won) resolve(null);
+      }).catch(function () { pending--; if (!pending && !won) resolve(null); });
+    });
+  });
+}
+
+function selectServerStream(streams, mirror, ordinal) {
+  var seen = Object.create(null);
+  var unique = (streams || []).filter(function (stream) {
+    if (!stream || !/^https?:\/\//i.test(stream.url) || seen[stream.url]) return false;
+    seen[stream.url] = true; return true;
+  });
+  var hls = unique.filter(isHlsStream);
+  var direct = unique.filter(function (stream) { return !isHlsStream(stream); });
+  return firstChecked(hls, true).then(function (winner) {
+    return winner || firstChecked(direct, false);
+  }).then(function (winner) {
+    if (!winner) return [];
+    var extractor = String(winner.label || "Server").replace(/\s+MP4$/i, "");
+    if (/^(Direct|Nested|Server|Script)$/i.test(extractor)) extractor = hostOf(mirror.url) || "Server";
+    if (/^dood$/i.test(extractor)) extractor = "DoodStream";
+    if (/^voe$/i.test(extractor)) extractor = "Voe";
+    var label = String(mirror.label || "").trim();
+    var number = label.match(/^server[\s_-]*(\d+)$/i);
+    var name = number ? extractor + " " + number[1] : !label || /^(Server|Script)$/i.test(label) ? extractor + " " + ordinal : label.toLowerCase() === extractor.toLowerCase() ? extractor + " " + ordinal : label + " • " + extractor;
+    winner.label = name;
+    winner.choiceId = mirror.url;
+    return [winner];
+  });
+}
+
 function resolveMirrors(mirrors, pageUrl) {
   var selected = (mirrors || []).slice().sort(function (a, b) {
     return mirrorPriority(a) - mirrorPriority(b);
-  }).slice(0, 6);
+  });
 
   console.log("[PencuriMovie] mirrors=" + mirrors.length);
   console.log("[PencuriMovie] mirror hosts=" + selected.map(function (x) {
@@ -1187,7 +1159,9 @@ function resolveMirrors(mirrors, pageUrl) {
   }).join(" | "));
 
   return Promise.all(selected.map(function (mirror) {
-    return resolveMirror(mirror, pageUrl, 0).catch(function () { return []; });
+    return resolveMirror(mirror, pageUrl, 0).then(function (streams) {
+      return selectServerStream(streams, mirror, (mirrors || []).indexOf(mirror) + 1);
+    }).catch(function () { return []; });
   })).then(function (groups) {
     var flat = [];
     groups.forEach(function (group) { flat = flat.concat(group || []); });
@@ -1220,11 +1194,8 @@ function getStreams(tmdbId, mediaType, season, episode) {
       return resolveMirrors(mirrors, playback.url);
     })
     .then(function (resolved) {
-      return filterDeadDoodStreams(resolved || []);
-    })
-    .then(function (resolved) {
       var streams = formatStreams(resolved || []);
-      console.log("[PencuriMovie] v" + VERSION + " playable sources=" + streams.length);
+      console.log("[PencuriMovie] v" + VERSION + " checked sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

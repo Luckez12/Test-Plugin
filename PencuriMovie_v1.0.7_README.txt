@@ -1,0 +1,29 @@
+PencuriMovie JS v1.0.7 - one checked link per website server choice
+
+Replace providers/pencurimovie.js and manifest.json at the Test-Plugin repository root.
+Built on working extraction v1.0.6; MSM and other providers unchanged.
+
+Behavior:
+- Keep all discovered unique mirror URLs eligible: removed the old top-six selection cut. Existing host-priority sort remains, but selected mirror requests are concurrent.
+- For each website server choice, probe extracted HLS candidates concurrently. Return only the first candidate with valid EXTM3U and master/media tags. Expose it as Auto. Do not wait for a later master or higher resolution after a valid HLS result.
+- Cancel sibling candidate probes when supported. Every host uses the same 2-second per-candidate validation limit, including playlist body reading. This is a new media-check limit, not a host timeout extension. Existing extraction request timeouts and title/search remain unchanged.
+- Only if no HLS passes, probe direct media using Range bytes=0-0. Require successful 200/206 plus video MIME or octet-stream with total-size evidence. Never expose an MP4 candidate merely because extraction returned its URL.
+- Return at most one link per website choice. Retain distinct choices using website Server N labels, such as HGCloud 3, HGCloud 4, Voe 5, Voe 6. If an explicit number is unavailable, use discovery order; custom website names are preserved with the extractor name.
+- Read website tab labels before generic iframe selectors. Deduplicate within a choice while keeping different choices visible, even if their media URL is identical.
+- Preserve signed queries, UA, Origin, supplied Referer including lowercase headers, and noReferer. Validation Range is never copied into playback headers.
+- Remove old cross-choice Dood ranking/probing; Dood uses the same direct-media check as other hosts.
+- No provider-wide first-winner race. getStreams still waits for each mirror's selection to finish and returns the available checked choices together.
+- Debug log now says checked sources rather than declaring all extracted candidates playable.
+
+Validation:
+node --check providers/pencurimovie.js
+node scripts/validate-manifest.js
+node tests/test-pencurimovie-extraction.js
+node tests/test-pencurimovie-selection.js
+18 mocked checks passed: extraction regressions, first valid per-choice winner, sibling cancellation, invalid/HTML rejection, MP4 fallback, bounded checks without AbortController, website labels, distinct same-host choices, and header/URL preservation. Test deadline is shortened for the same production path.
+
+Limits:
+- Playlist/header checks do not decode frames or test every HLS segment; actual app playback must be checked.
+- Checks may increase discovery time: HLS validation can add up to 2 seconds, followed by up to 2 seconds for fallback when HLS fails. All mirrors remain concurrent; upstream extraction can still be slow. No total runtime timeout is changed.
+- If Android ignores abort signals, underlying sibling bridge requests may continue despite a settled validation result.
+- The user's working Auto links were observed on v1.0.6; this v1.0.7 selection path has not yet been tested in the actual app.

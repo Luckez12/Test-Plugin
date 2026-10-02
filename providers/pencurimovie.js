@@ -1,5 +1,5 @@
 const PROVIDER = "PencuriMovie";
-const VERSION = "1.0.7";
+const VERSION = "1.0.8";
 const BASE = "https://ww44.pencurimovie.baby";
 const TMDB_BASE = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
@@ -801,9 +801,9 @@ function voeJsonPayloads(html) {
 function voeMediaUrl(value, base) {
   // Accept decoder-owned source fields even when the current engine omits .m3u8/.mp4.
   // Do not scrape arbitrary page URLs: Voe embeds a dummy test video on the same page.
-  var raw = decodeHtmlEntities(String(value || "")).replace(/\\u0026/gi, "&").replace(/\\u003d/gi, "=").replace(/\\\//g, "/").trim();
+  var raw = String(value || "").trim(); // JSON.parse already decoded escapes; signed fields must remain exact.
   if (!raw || /^(?!https?:)[a-z][a-z0-9+.-]*:/i.test(raw)) return "";
-  var url = absoluteUrl(base, raw);
+  var url = /^https?:\/\//i.test(raw) ? raw : absoluteUrl(base, raw);
   return /^https?:\/\//i.test(url) ? url : "";
 }
 
@@ -835,8 +835,9 @@ function resolveVoe(url, referer) {
         var media = voeMediaUrl(value, response.url);
         if (!media || seen[media]) return;
         seen[media] = true;
-        out.push({ url: media, referer: hls ? "https://voe.sx/" : response.url, label: label,
-          headers: hls ? { "Origin": "https://voe.sx" } : {} });
+        out.push({ url: media, referer: hls ? "https://voe.sx/" : url, label: label, voe: true,
+          mimeType: hls ? "application/x-mpegURL" : null,
+          headers: hls ? { "Origin": "https://voe.sx/" } : {} });
       }
       add(data.source, "VOE", true);
       add(data.direct_access_url, "VOE MP4", false);
@@ -1021,7 +1022,8 @@ function formatStreams(streams) {
       title: label + " • " + quality + " • MalaySub",
       url: url,
       quality: quality,
-      headers: headers
+      headers: headers,
+      mimeType: stream.hlsVerified ? "application/x-mpegURL" : (stream.mimeType || undefined)
     });
   });
 
@@ -1092,7 +1094,10 @@ function checkMedia(stream, hls) {
         return next < lines.length && !/^(?!https?:)[a-z][a-z0-9+.-]*:/i.test(lines[next]) && /^https?:\/\//i.test(absoluteUrl(res.url || stream.url, lines[next]));
       });
       if (!media && !master) return null;
-      return Object.assign({}, stream, { hlsVerified: true });
+      // Keep Auto master playback, as Cloudstream generateM3u8(returnThis=true) does.
+      // Use the actual HTTP response URL when VOE redirects a signed playlist.
+      var verifiedUrl = stream.voe && /^https?:\/\//i.test(res.url || "") ? res.url : stream.url;
+      return Object.assign({}, stream, { url: verifiedUrl, hlsVerified: true });
     });
     var type = res.headers && res.headers.get ? String(res.headers.get("content-type") || "").toLowerCase() : "";
     var range = res.headers && res.headers.get ? String(res.headers.get("content-range") || "") : "";

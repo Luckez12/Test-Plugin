@@ -1,0 +1,13 @@
+PencuriMovie JS v1.0.8 — VOE Cloudstream alignment
+Apply providers/pencurimovie.js and manifest.json to Test-Plugin.
+
+Changes: VOE HLS Origin https://voe.sx/ and Referer https://voe.sx/ match Voe.kt. MP4 fallback Referer uses original embed URL. Decoded signed URLs are preserved exactly. Verified VOE HTTP redirects carry their final URL into playback. HLS sources explicitly declare mimeType application/x-mpegURL. Retain Auto master playlist, one checked result per website choice, existing common validation timeout.
+
+VUEO companion fix is required: DefaultHttpDataSource's configured VUEO User-Agent overwrites provider User-Agent. Apply VUEO_Provider_User_Agent_Playback_Fix.patch at the VUEO repo root with:
+git apply --check VUEO_Provider_User_Agent_Playback_Fix.patch
+git apply VUEO_Provider_User_Agent_Playback_Fix.patch
+The incremental patch changes only User-Agent selection (Mobile/TV) and TV header effect key; it avoids replacing files containing newer UI work. Missing provider User-Agent retains the app fallback.
+
+Validation: 12 extraction + 8 server-selection mocked checks, JS syntax, manifest validation. App patch application checked against VUEO repo (34); no APK compiled here. Actual Android playback and HTTP 403 resolution remain unverified. Live VOE master GET succeeded HTTP 200, but comparative requests were inconsistent/timeouts; they do not prove Origin alone caused 403.
+
+Primary source reviewed: recloudstream/cloudstream Voe.kt and library/src/commonMain/kotlin/com/lagradost/cloudstream3/utils/M3u8Helper.kt; androidx/media DefaultHttpDataSource.java release branch. No signed captures included.

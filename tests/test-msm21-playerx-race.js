@@ -52,13 +52,13 @@ await test('only valid manifests and HTTP video responses pass; HTML and 403 fai
 await test('empty early result and rejection cannot win the race',async()=>{
  const x=instance(()=>{});const r=await x.api.firstResult([Promise.resolve([]),Promise.reject(Error('fail')),new Promise(r=>setTimeout(()=>r(['valid']),10))]);assert.equal(r[0],'valid');assert.equal((await x.api.firstResult([Promise.resolve([])])).length,0);x.close();
 });
-await test('parallel AJAX -> extraction bypasses blocked choices including first six',async()=>{
+await test('parallel AJAX -> extraction includes choices beyond six without losing winners',async()=>{
  let calls=0,aborts=0;const x=instance((u,o)=>{
  if(u.includes('admin-ajax')){calls++;if(o.body.includes('nume=9&'))return Promise.resolve(response(u,JSON.stringify({embed_url:'https://cdn.example/master.m3u8?sig=a%2Fb'})));
  return new Promise((resolve,reject)=>o.signal.addEventListener('abort',()=>{aborts++;reject(Error('cancelled'));}));}
  return Promise.resolve(response(u,master));});
  const html=Array.from({length:9},(_,i)=>`<li data-post="1" data-nume="${i+1}" data-type="movie">RPM ${i+1} MalaySub</li>`).join('');
- const start=Date.now();const groups=await x.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html});assert.equal(calls,9);assert.equal(groups[0].length,1);assert.equal(groups[0][0].label,'RPM 9 MalaySub');assert.equal(aborts,8);assert(Date.now()-start<80);x.close();
+ const start=Date.now();const groups=await x.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html});assert.equal(calls,9);assert.equal(groups[0].length,1);assert.equal(groups[0][0].label,'RPM 9 MalaySub');assert.equal(aborts,8);assert(Date.now()-start<180);x.close();
 });
 await test('Abyss resolver stays byte-for-byte identical',async()=>{
  const body=source.slice(source.indexOf('function resolveAbyss('),source.indexOf('function resolveGeneric('));
@@ -93,7 +93,28 @@ await test('public export completes movie and selected TV episode through encryp
  x.close();
 });
 await test('all blocked mirrors complete within the common bounded wait',async()=>{
- const x=instance(()=>new Promise(()=>{}));const start=Date.now();const g=await x.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html:'<li data-post="1" data-nume="1" data-type="movie">Abyss</li>'});assert.equal(g[0].length,0);assert(Date.now()-start<180);x.close();
+ const x=instance(()=>new Promise(()=>{}));const start=Date.now();const g=await x.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html:'<li data-post="1" data-nume="1" data-type="movie">Abyss</li>'});assert.equal(g.length,0);assert(Date.now()-start<180);x.close();
+});
+await test('each option retains its fastest checked source, without global winner cancellation',async()=>{
+ const x=instance(async(u,o)=>{
+  if(u.includes('admin-ajax')){const n=o.body.match(/nume=(\d+)/)[1];return response(u,JSON.stringify({embed_url:'<iframe src="https://cdn.example/'+n+'-fast.m3u8"></iframe><iframe src="https://cdn.example/'+n+'-slow.m3u8"></iframe>'}));}
+  await new Promise(r=>setTimeout(r,u.includes('-slow')?35:u.includes('/2-')?15:2));return response(u,master);
+ });
+ const html=[1,2].map(n=>`<li data-post="1" data-nume="${n}" data-type="movie">Server ${n}</li>`).join('');
+ const g=await x.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html});assert.equal(g.length,2);assert(g.every(a=>a.length===1&&a[0].url.includes('-fast')));assert.deepEqual(g.map(a=>a[0].label).sort(),['Server 1','Server 2']);x.close();
+});
+await test('common scan deadline preserves completed sources and rejects late results',async()=>{
+ const x=instance(async(u,o)=>{
+  if(u.includes('admin-ajax')&&o.body.includes('nume=2&')){await new Promise(r=>setTimeout(r,65));const res=response(u,'');res.text=async()=>{await new Promise(r=>setTimeout(r,65));return JSON.stringify({embed_url:'https://cdn.example/late.m3u8'});};return res;}
+  if(u.includes('admin-ajax'))return response(u,JSON.stringify({embed_url:'https://cdn.example/fast.m3u8'}));
+  return response(u,master);
+ });
+ const html=[1,2].map(n=>`<li data-post="1" data-nume="${n}" data-type="movie">Server ${n}</li>`).join('');
+ const start=Date.now();const g=await x.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html});assert.equal(g.length,1);assert(g[0][0].url.includes('/fast'));assert(Date.now()-start>=100);await new Promise(r=>setTimeout(r,30));assert.equal(g.length,1);x.close();
+});
+await test('all failures or no options stop as soon as work is exhausted',async()=>{
+ const x=instance(async u=>response(u,'',404));let start=Date.now();let g=await x.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html:'<li data-post="1" data-nume="1" data-type="movie">Missing</li>'});assert.equal(g.length,0);assert(Date.now()-start<50);x.close();
+ const y=instance(()=>{throw Error('No request expected');});g=await y.api.scanPlayback('https://movie.example',{url:'https://movie.example/item',html:'<p>No server</p>'});assert.equal(g.length,0);y.close();
 });
 console.log(`${passes} MSM regression tests passed`);
 })().catch(e=>{console.error(e);process.exitCode=1;});

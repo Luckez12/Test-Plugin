@@ -151,10 +151,32 @@ function scanPlayback(base, playback) {
   }) : collectStaticMirrors(playback.html,playback.url).map(function(mirror){
     return resolveMirror(mirror,playback.url,0).then(function(streams){return firstChecked(streams,mirror,mirror.url);});
   });
-  return new Promise(function(resolve) {
-    var done = false;var timer=setTimeout(function(){finish([]);},SCAN_MS);
-    function finish(result){if(done)return;done=true;clearTimeout(timer);stopScan();resolve([result]);}
-    firstResult(jobs).then(finish,function(){finish([]);});
+  // Keep one checked winner per website option. An empty/failed option is
+  // complete immediately; it cannot cancel winners from other options.
+  return new Promise(function (resolve) {
+    var done = false;
+    var remaining = jobs.length;
+    var groups = [];
+    var timer = setTimeout(finish, SCAN_MS);
+
+    function finish() {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      stopScan();
+      resolve(groups);
+    }
+
+    function completed(result) {
+      if (done) return;
+      if (result && result.length) groups.push(result.slice(0, 1));
+      if (--remaining === 0) finish();
+    }
+
+    if (!remaining) return finish();
+    jobs.forEach(function (job) {
+      Promise.resolve(job).then(completed, function () { completed([]); });
+    });
   });
 }
 
@@ -1498,7 +1520,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       });
 
       var streams = formatStreams(flat);
-      console.log("[MSM21] v1.0.5 checked sources=" + streams.length);
+      console.log("[MSM21] v1.0.6 checked sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {

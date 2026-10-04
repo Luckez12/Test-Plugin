@@ -1,6 +1,6 @@
 {
   "name": "Clouderz Plugins",
-  "version": "1.7.18",
+  "version": "1.7.19",
   "scrapers": [
     {
       "id": "4khdhub",
@@ -130,7 +130,7 @@
       "id": "msm21",
       "name": "MSM21",
       "description": "Malay subtitle movies and TV provider",
-      "version": "1.0.5",
+      "version": "1.0.6",
       "author": "Luckez12",
       "supportedTypes": [
         "movie",

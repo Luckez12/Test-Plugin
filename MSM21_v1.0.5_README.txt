@@ -1,0 +1,28 @@
+MSM21 JS v1.0.5 — PlayerX / parallel discovery
+
+Apply this ZIP at the Test-Plugin repository root using the existing ZIP patch workflow.
+Refresh the plugin in VUEO and confirm MSM21 v1.0.5 is loaded.
+
+Changed:
+- PlayerX API/AES extraction for RPM, Seek, P2P, Upns and player4me, following the supplied Cloudstream implementation.
+- Every website player option is started concurrently. Each AJAX response proceeds immediately to extraction and source checking, without waiting for the other AJAX responses.
+- Return ONE source: the first candidate that passes the shared source check. Failed or empty responses cannot win. Remaining results are ignored; network abort is used where the runtime supports it.
+- Removed the six-option/six-mirror discovery restriction and priority groups.
+- Uniform request wait: 3.5 seconds per fetch/read; mirror discovery budget: 6.5 seconds after the playback page is available. The app's provider deadline remains unchanged. Metadata/title lookup happens before this mirror budget.
+- Website server names and numbers are preserved. Repeated MalaySub text is removed from the display label. HLS returns Auto with an explicit HLS MIME type.
+- Signed absolute URLs and playback headers are preserved.
+
+Preserved:
+- resolveAbyss is byte-for-byte identical to v1.0.4. Abyss participates in the same race and checks as every other server.
+- PencuriMovie and every other provider are unchanged.
+- Byse API and VOE/HG extractor upgrades are outside this patch.
+
+Checks and limits:
+- HLS must return HTTP 200/206 and a recognizable master/media playlist. Direct video is checked with a 512-byte Range request and video response headers.
+- This checks discovery responses, not decoder compatibility or every media segment/key. A later segment can still fail or return 403.
+- VUEO's supplied fetch bridge does not implement AbortController, and its clearTimeout is a no-op. The JS stops waiting/accepting results; already started native requests may finish in the background.
+- 13 offline regression cases passed, plus JS syntax and manifest validation. Tests cover AES payloads, signed URLs, all supported hosts, options beyond six, failed responses, races, scan isolation, Abyss preservation, and complete mocked movie/episode flows. Real Android playback still needs testing.
+
+Run from repository root after installing existing dependencies:
+  node tests/test-msm21-playerx-race.js
+  node scripts/validate-manifest.js

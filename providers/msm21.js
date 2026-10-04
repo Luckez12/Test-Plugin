@@ -1,3 +1,163 @@
+function createMsmProvider(transportFetch) {
+const REQUEST_MS = 3500;
+const SCAN_MS = 6500;
+var stopped = false;
+var pendingRequests = [];
+function stopScan() {
+  stopped = true;
+  pendingRequests.slice().forEach(function (cancel) { cancel(); });
+}
+function fetch(url, options) {
+  if (stopped) return Promise.reject(new Error('scan_stopped'));
+  var controller = typeof AbortController === 'function' ? new AbortController() : null;
+  var opts = Object.assign({}, options || {});
+  if (controller) opts.signal = controller.signal;
+  return new Promise(function (resolve, reject) {
+    var done = false;
+    var timer;
+    function remove() { clearTimeout(timer); var i = pendingRequests.indexOf(cancel); if (i >= 0) pendingRequests.splice(i, 1); }
+    function cancel() { if (controller) controller.abort(); if (!done) { done = true; remove(); reject(new Error('request_cancelled')); } }
+    pendingRequests.push(cancel);
+    timer = setTimeout(cancel, REQUEST_MS);
+    Promise.resolve().then(function () { return transportFetch(url, opts); }).then(function (res) {
+      if (done || stopped) return;
+      done = true;
+      remove();
+      // Headers can be inspected without downloading a full video body.
+      resolve({ status: res.status, ok: res.ok, url: res.url || url, headers: res.headers,
+        text: function () {
+          return new Promise(function (readResolve, readReject) {
+            var settled = false;
+            function end(error, value) { if (settled) return; settled = true; clearTimeout(readTimer); var i = pendingRequests.indexOf(readCancel); if (i >= 0) pendingRequests.splice(i, 1); if (error) readReject(error); else readResolve(value); }
+            function readCancel() { if (controller) controller.abort(); end(new Error('body_cancelled')); }
+            pendingRequests.push(readCancel);
+            var readTimer = setTimeout(readCancel, REQUEST_MS);
+            if (stopped) return readCancel();
+            Promise.resolve().then(function () { return res.text(); }).then(function (v) { end(null, v); }, function (e) { end(e); });
+          });
+        },
+        cancel: function () { if (controller) controller.abort(); if (res.body && res.body.cancel) Promise.resolve(res.body.cancel()).catch(function () {}); }
+      });
+    }, function (error) { if (!done) { done = true; remove(); reject(error); } });
+  });
+}
+function mediaAllowed(raw) {
+  var host = hostOf(raw);
+  return /^https?:\/\//i.test(raw) && host && !/(^|\.)(?:google-analytics\.com|googletagmanager\.com|doubleclick\.net|googlesyndication\.com|mc\.yandex\.(?:ru|com)|pixel\.morphify\.(?:com|net)|static\.cloudflareinsights\.com)$/.test(host);
+}
+function signedQuery(raw, key, value) {
+  var enc = function (s) { return encodeURIComponent(String(s)).replace(/[!'()*]/g, function(c) { return '%' + c.charCodeAt(0).toString(16).toUpperCase(); }).replace(/%20/g, '+'); };
+  var clean = raw.split('#')[0]; var q = clean.indexOf('?');
+  var pairs = (q < 0 ? '' : clean.slice(q + 1)).split('&').filter(function (p) { return p && p.split('=')[0] !== enc(key); });
+  pairs.push(enc(key) + '=' + enc(value)); return (q < 0 ? clean : clean.slice(0, q)) + '?' + pairs.join('&');
+}
+function playerXUrl(raw, base) {
+  if (/^https?:\/\//i.test(raw)) return raw; // Never normalize signed absolute URLs.
+  if (/^(?!https?:)[a-z][a-z0-9+.-]*:/i.test(raw)) return '';
+  try { return new URL(raw, base).href; } catch (_) { return absoluteUrl(base.replace(/\/?$/, '/'), raw); }
+}
+function resolvePlayerX(url, pageUrl) {
+  var host = hostOf(url);
+  if (['playerx.player4me.online','playerx.rpmplay.online','playerx.seekplays.online','playerx.p2pstream.online','playerx.upns.live'].indexOf(host) < 0 || !/^https:\/\//.test(url)) return Promise.resolve([]);
+  var id = url.indexOf('#') < 0 ? '' : url.split('#')[1].split('&')[0];
+  if (!/^[A-Za-z0-9_-]{2,100}$/.test(id)) return Promise.resolve([]);
+  var base = originOf(url); var headers = {'User-Agent':USER_AGENT,'Referer':base+'/','Origin':base};
+  return fetchText(base + '/api/v1/video?id=' + encodeURIComponent(id) + '&w=1080&h=1080&r=' + encodeURIComponent(hostOf(pageUrl).replace(/^www\./,'')), {headers:headers}).then(function (hex) {
+    hex = String(hex).trim();
+    if (hex.length < 32 || hex.length > 2000000 || hex.length % 32 || !/^[0-9a-f]+$/i.test(hex)) return [];
+    var C = require('crypto-js');
+    // Both CryptoJS and VUEO's bridge accept a Base64 ciphertext string.
+    var ciphertext = C.enc.Base64.stringify(C.enc.Hex.parse(hex));
+    var decoded = C.AES.decrypt(ciphertext, C.enc.Utf8.parse('kiemtienmua911ca'), {iv:C.enc.Utf8.parse('1234567890oiuytr'),mode:C.mode.CBC,padding:C.pad.Pkcs7}).toString(C.enc.Utf8);
+    var data = JSON.parse(decoded.replace(/^\uFEFF/,'')); var adjust = {};
+    try { adjust = JSON.parse(data.streamingConfig || '{}').adjust || {}; } catch (_) {}
+    var options = [];
+    if (!(adjust.Cloudflare || {}).disabled) options.push(['Native',data.cfNative]);
+    [['In-House','source'],['Tiktok','hlsVideoTiktok'],['Google','hlsVideoGoogle']].forEach(function (pair) {
+      var cfg = adjust[pair[0]] || {}; var raw = data[pair[1]];
+      if (cfg.disabled || typeof raw !== 'string' || !raw.trim()) return;
+      if (cfg.domain) raw = raw.split('/hls/').join('/hlsmod/' + cfg.domain + '/');
+      Object.keys(cfg.params || {}).forEach(function (k) { raw = signedQuery(raw,k,cfg.params[k]); });
+      if (playerXUrl(raw,base).split('?')[0].indexOf('/v4/') >= 0) ['k','kx'].forEach(function (k) { if ((data.pk || {})[k]) raw = signedQuery(raw,k,data.pk[k]); });
+      options.push([pair[0],raw]);
+    });
+    var seen = {};
+    return options.map(function (pair) {
+      if (typeof pair[1] !== 'string') return null;
+      var media = playerXUrl(pair[1].trim(),base);
+      if (!mediaAllowed(media) || seen[media]) return null; seen[media] = true;
+      return {url:media,referer:base+'/',headers:headers,label:'PlayerX '+pair[0],mimeType:'application/x-mpegURL'};
+    }).filter(Boolean);
+  }).catch(function (error) { console.log('[MSM21] PLAYERX_FAILED host='+host+' error='+String(error && error.name || 'Error'));return []; });
+}
+function playbackHeaders(stream) {
+  var headers = Object.assign({},stream.headers || {});
+  function has(name) { return Object.keys(headers).some(function(k) { return k.toLowerCase() === name.toLowerCase(); }); }
+  if (!has('User-Agent')) headers['User-Agent'] = USER_AGENT;
+  if (!has('Accept')) headers.Accept = '*/*';
+  if (stream.noReferer) { delete headers.Referer; delete headers.referer; }
+  else if (!has('Referer')) headers.Referer = stream.referer || originOf(stream.url)+'/';
+  return headers;
+}
+function checkSource(stream) {
+  if (stopped || !mediaAllowed(stream.url)) return Promise.resolve(null);
+  var hls = stream.mimeType === 'application/x-mpegURL' || /\.m3u8(?:[?#]|$)/i.test(stream.url);
+  var headers = playbackHeaders(stream); if (!hls) headers.Range = 'bytes=0-511';
+  return fetch(stream.url,{headers:headers}).then(function (res) {
+    if ([200,206].indexOf(res.status) < 0 || !mediaAllowed(res.url)) { res.cancel();return null; }
+    var responseType = res.headers && res.headers.get ? String(res.headers.get('content-type') || '') : '';
+    if (hls || /mpegurl/i.test(responseType)) return res.text().then(function (body) {
+      var text = String(body).trim().replace(/^\uFEFF/,''); if (!/^#EXTM3U(?:\r?\n|$)/.test(text)) return null;
+      var lines = text.split(/\r?\n/).map(function(l){return l.trim();});
+      var master = lines.some(function (l,i) { return /^#EXT-X-STREAM-INF:/.test(l) && lines[i+1] && lines[i+1][0] !== '#' && mediaAllowed(playerXUrl(lines[i+1],res.url)); });
+      var media = /^#EXTINF:/m.test(text) && lines.some(function(l){return l && l[0] !== '#' && mediaAllowed(playerXUrl(l,res.url));});
+      return master || media ? Object.assign({},stream,{checkedHls:true,masterHls:master,mimeType:'application/x-mpegURL'}) : null;
+    });
+    var type = res.headers && res.headers.get ? String(res.headers.get('content-type') || '') : '';
+    var range = res.headers && res.headers.get ? String(res.headers.get('content-range') || '') : '';
+    res.cancel();
+    return /^video\//i.test(type) || (/application\/octet-stream/i.test(type) && /\/\d+$/.test(range)) ? stream : null;
+  }).catch(function(){return null;});
+}
+function firstResult(jobs) {
+  if (!jobs.length) return Promise.resolve([]);
+  return new Promise(function(resolve) {
+    var remaining = jobs.length; var settled = false;
+    jobs.forEach(function(job) { Promise.resolve(job).then(function(result) {
+      if (settled) return;
+      if (result && result.length) { settled = true; resolve(result); }
+      else if (--remaining === 0) { settled = true;resolve([]); }
+    }, function() { if (!settled && --remaining === 0) {settled=true;resolve([]);} }); });
+  });
+}
+function firstChecked(streams, mirror, choice) {
+  var seen = {};
+  var candidates = (streams || []).filter(function(s) { if (!s || seen[s.url]) return false;seen[s.url]=true;return true; });
+  // PlayerX Native is the master proxy advertised by its API; try HLS candidates before direct files.
+  var hls = candidates.filter(function(s){return s.mimeType === 'application/x-mpegURL' || /\.m3u8(?:[?#]|$)/i.test(s.url);});
+  var direct = candidates.filter(function(s){return hls.indexOf(s)<0;});
+  function group(items) { return firstResult(items.map(function(s){return checkSource(s).then(function(v){
+    if (!v) return [];v.label=mirror.label || v.label;v.choiceId=choice;return [v];
+  });})); }
+  return group(hls).then(function(result){return result.length ? result : group(direct);});
+}
+function scanPlayback(base, playback) {
+  var options = extractPlayerOptions(playback.html);
+  var jobs = options.length ? options.map(function(option) {
+    var choice = option.post+'|'+option.nume+'|'+option.type;
+    return fetchOptionMirrors(base,playback.url,option).then(function(mirrors){
+      return firstResult(mirrors.map(function(mirror){return resolveMirror(mirror,playback.url,0).then(function(streams){return firstChecked(streams,mirror,choice);});}));
+    });
+  }) : collectStaticMirrors(playback.html,playback.url).map(function(mirror){
+    return resolveMirror(mirror,playback.url,0).then(function(streams){return firstChecked(streams,mirror,mirror.url);});
+  });
+  return new Promise(function(resolve) {
+    var done = false;var timer=setTimeout(function(){finish([]);},SCAN_MS);
+    function finish(result){if(done)return;done=true;clearTimeout(timer);stopScan();resolve([result]);}
+    firstResult(jobs).then(finish,function(){finish([]);});
+  });
+}
+
 const PROVIDER = "MSM21";
 const BASE_CANDIDATES = [
   "https://pencurimoviesubmalay26.site",
@@ -17,6 +177,7 @@ function getCheerio() {
 function fetchResponse(url, options) {
   return fetch(url, options || {}).then(function (res) {
     if (!res || !res.ok) {
+      if (res && res.cancel) res.cancel();
       throw new Error("HTTP " + (res ? res.status : "unknown") + " " + url);
     }
     return res.text().then(function (text) {
@@ -527,7 +688,7 @@ function extractPlayerOptions(html) {
   var $ = cheerio.load(html);
   var out = [];
 
-  $("li.zetaflix_player_option[data-post][data-nume][data-type]").each(function (_, el) {
+  $("[data-post][data-nume][data-type]").each(function (_, el) {
     var node = $(el);
     var nume = String(node.attr("data-nume") || "").trim();
     var post = String(node.attr("data-post") || "").trim();
@@ -535,10 +696,7 @@ function extractPlayerOptions(html) {
 
     if (!nume || /^fake$/i.test(nume) || !post || !type) return;
 
-    var label = [
-      node.find(".opt-titl").first().text(),
-      node.find(".opt-name").first().text()
-    ].join(" ").replace(/\s+/g, " ").trim() || ("Server " + nume);
+    var label = node.text().replace(/\s+/g, " ").trim() || ("Server " + nume);
 
     out.push({
       post: post,
@@ -631,159 +789,6 @@ function fetchOptionMirrors(base, pageUrl, option) {
     return [];
   });
 }
-
-function playerOptionPriority(option) {
-  var value = String(option && option.label || "").toLowerCase();
-  if (/fire|wish|hgl/.test(value)) return 0;
-  if (/playm/.test(value)) return 1;
-  if (/byse/.test(value)) return 2;
-  if (/voe/.test(value)) return 3;
-  if (/mix/.test(value)) return 4;
-  if (/dsv|dood/.test(value)) return 5;
-  if (/abyss/.test(value)) return 6;
-  if (/veev/.test(value)) return 7;
-  if (/player|playe|ezpla|rpm|seek|p2p|upns/.test(value)) return 20;
-  return 10;
-}
-
-function mirrorPriority(mirror) {
-  var value = (String(mirror && mirror.label || "") + " " +
-    String(mirror && mirror.url || "")).toLowerCase();
-  if (/streamwish|hglink|wish|fire/.test(value)) return 0;
-  if (/playm/.test(value)) return 1;
-  if (/byse/.test(value)) return 2;
-  if (/voe/.test(value)) return 3;
-  if (/mixdrop|mixdr/.test(value)) return 4;
-  if (/dsvplay|dood/.test(value)) return 5;
-  if (/abyss|playhydrax/.test(value)) return 6;
-  if (/playerx|p2pstream|upns|ezpla|rpmpl|seekp/.test(value)) return 20;
-  return 10;
-}
-
-function isFastMirror(mirror) {
-  var value = (String(mirror && mirror.label || "") + " " +
-    String(mirror && mirror.url || "")).toLowerCase();
-
-  return isLikelyStreamUrl(String(mirror && mirror.url || "")) ||
-    /playmate|playm|streamwish|hglink|wish|fire|voe|mixdrop|mixdr|dsvplay|dood/.test(value);
-}
-
-function resolveMirrorsFastFirst(mirrors, pageUrl) {
-  var limited = (mirrors || []).slice(0, 6);
-
-  var playmate = limited.filter(function (mirror) {
-    return /playmate\.to|playmate|playm/i.test(
-      String(mirror && mirror.url || "") + " " + String(mirror && mirror.label || "")
-    );
-  });
-
-  var reliable = limited.filter(function (mirror) {
-    var value = (String(mirror && mirror.url || "") + " " +
-      String(mirror && mirror.label || "")).toLowerCase();
-    return playmate.indexOf(mirror) === -1 &&
-      /dsvplay|dood|streamwish|hglink|wish|fire|voe/.test(value);
-  });
-
-  var fallback = limited.filter(function (mirror) {
-    return playmate.indexOf(mirror) === -1 && reliable.indexOf(mirror) === -1;
-  });
-
-  function resolveGroup(group) {
-    return Promise.all(group.map(function (mirror) {
-      return resolveMirror(mirror, pageUrl, 0).catch(function () {
-        return [];
-      });
-    }));
-  }
-
-  function streamCount(groups) {
-    var count = 0;
-    (groups || []).forEach(function (group) {
-      count += Array.isArray(group) ? group.length : 0;
-    });
-    return count;
-  }
-
-  function tryReliable() {
-    if (!reliable.length) return tryFallback();
-    return resolveGroup(reliable).then(function (groups) {
-      var count = streamCount(groups);
-      if (count > 0) {
-        console.log("[MSM21] reliable streams=" + count + " fallback mirrors skipped=" + fallback.length);
-        return groups;
-      }
-      return tryFallback();
-    });
-  }
-
-  function tryFallback() {
-    if (!fallback.length) return Promise.resolve([]);
-    console.log("[MSM21] reliable path empty, trying fallback mirrors=" + fallback.length);
-    return resolveGroup(fallback);
-  }
-
-  if (!playmate.length) return tryReliable();
-
-  console.log("[MSM21] Playmate priority host=" + hostOf(playmate[0].url));
-  return resolveGroup(playmate).then(function (groups) {
-    var count = streamCount(groups);
-    if (count > 0) {
-      console.log("[MSM21] Playmate streams=" + count + " other mirrors skipped=" + (reliable.length + fallback.length));
-      return groups;
-    }
-    return tryReliable();
-  });
-}
-
-function collectMirrors(base, playback) {
-  var options = extractPlayerOptions(playback.html);
-
-  if (!options.length) {
-    var staticMirrors = collectStaticMirrors(playback.html, playback.url);
-    console.log("[MSM21] static mirrors=" + staticMirrors.length);
-    console.log(
-      "[MSM21] mirror hosts=" +
-      staticMirrors.map(function (x) {
-        return hostOf(x.url) + "[" + String(x.label || "") + "]";
-      }).join(" | ")
-    );
-    return Promise.resolve(staticMirrors.sort(function (a, b) {
-      return mirrorPriority(a) - mirrorPriority(b);
-    }));
-  }
-
-  var selected = options.slice().sort(function (a, b) {
-    return playerOptionPriority(a) - playerOptionPriority(b);
-  }).slice(0, 6);
-
-  return Promise.all(selected.map(function (option) {
-    return fetchOptionMirrors(base, playback.url, option);
-  })).then(function (groups) {
-    var map = {};
-
-    groups.forEach(function (group) {
-      group.forEach(function (mirror) {
-        if (!map[mirror.url]) map[mirror.url] = mirror;
-      });
-    });
-
-    var mirrors = Object.keys(map).map(function (key) { return map[key]; });
-    console.log("[MSM21] mirrors=" + mirrors.length);
-    console.log(
-      "[MSM21] mirror hosts=" +
-      mirrors.map(function (x) {
-        return hostOf(x.url) + "[" + String(x.label || "") + "]";
-      }).join(" | ")
-    );
-    mirrors.forEach(function (x) {
-      console.log("[MSM21] mirror " + String(x.label || "") + " -> " + x.url);
-    });
-    return mirrors.sort(function (a, b) {
-      return mirrorPriority(a) - mirrorPriority(b);
-    });
-  });
-}
-
 
 function isLikelyStreamUrl(raw) {
   var value = String(raw || "").toLowerCase();
@@ -1381,7 +1386,11 @@ function resolveMirror(mirror, pageUrl, depth) {
     });
   }
 
-  return resolvePlaymate(url)
+  return resolvePlayerX(url, pageUrl)
+    .then(function (streams) {
+      if (streams.length) return streams;
+      return resolvePlaymate(url);
+    })
     .then(function (streams) {
       if (streams.length) return streams;
       return resolveDood(url, pageUrl);
@@ -1434,31 +1443,17 @@ function formatStreams(streams) {
     if (!url || seen[url]) return;
     seen[url] = true;
 
-    var quality = qualityFromUrl(url);
-    var label = String(stream.label || "MSM21").trim();
-    var headers = {};
-    var supplied = stream && stream.headers || {};
-
-    Object.keys(supplied).forEach(function (key) {
-      headers[key] = supplied[key];
-    });
-
-    if (!headers["User-Agent"]) headers["User-Agent"] = USER_AGENT;
-    if (!headers["Accept"]) headers["Accept"] = "*/*";
-
-    if (!stream.noReferer) {
-      headers["Referer"] = stream.referer || headers["Referer"] || originOf(url) + "/";
-    } else {
-      delete headers["Referer"];
-      delete headers["referer"];
-    }
+    var quality = stream.checkedHls ? "Auto" : qualityFromUrl(url);
+    var label = String(stream.label || "MSM21").replace(/\bMalaySub\b/ig, "").replace(/\s+/g, " ").trim() || "MSM21";
+    var headers = playbackHeaders(stream);
 
     out.push({
       name: PROVIDER,
       title: label + " • " + quality + " • MalaySub",
       url: url,
       quality: quality,
-      headers: headers
+      headers: headers,
+      mimeType: stream.mimeType || undefined
     });
   });
 
@@ -1492,9 +1487,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
     })
     .then(function (playback) {
       if (!playback) return [];
-      return collectMirrors(base, playback).then(function (mirrors) {
-        return resolveMirrorsFastFirst(mirrors, playback.url);
-      });
+      return scanPlayback(base, playback);
     })
     .then(function (groups) {
       if (!Array.isArray(groups)) return [];
@@ -1505,7 +1498,7 @@ function getStreams(tmdbId, mediaType, season, episode) {
       });
 
       var streams = formatStreams(flat);
-      console.log("[MSM21] v1.0.4 playable sources=" + streams.length);
+      console.log("[MSM21] v1.0.5 checked sources=" + streams.length);
       return streams;
     })
     .catch(function (error) {
@@ -1514,4 +1507,10 @@ function getStreams(tmdbId, mediaType, season, episode) {
     });
 }
 
-module.exports = { getStreams };
+return { getStreams };
+}
+
+// Each invocation owns its cancellation state; simultaneous scans cannot cancel one another.
+module.exports = { getStreams: function () {
+  return createMsmProvider(fetch).getStreams.apply(null, arguments);
+} };
